@@ -25,7 +25,7 @@ The minimum viable agent: connect, authenticate, converse, remember.
 - [x] Presence subscription for allowed JIDs (auto-subscribe + auto-accept)
 - [x] Typing indicators (outbound `<composing/>` / `<paused/>` / `<active/>`, XEP-0085)
 - [x] MUC room joining (XEP-0045) — join configured rooms, respond to mentions, full room context
-- [ ] Cross-domain message rejection (security default) — **next**
+- [x] Cross-domain message rejection (security default)
 - [ ] Reconnection with exponential backoff
 
 ### Conversation sessions ✓
@@ -61,24 +61,23 @@ Implemented: the agent sends proper XEP-0085 chat state notifications throughout
 - **`<paused/>`** — Sent if the LLM call fails, before the error message. Properly signals that the agent stopped generating without successfully producing a response.
 - **Slash commands skip composing** — Commands like `/ping`, `/status` are instant and deterministic. No typing indicator is sent for them.
 
-### Cross-domain message rejection
+### Cross-domain message rejection ✓
 
-By default, the agent should reject messages originating from a different XMPP domain than the one it is connected to. This prevents:
+Implemented: domain-level message filtering as a defense-in-depth security layer.
 
-- Unsolicited messages from federated servers reaching the agent
-- Abuse via federation from unknown domains
-- Prompt injection attacks from external senders
-
-The `allowed_jids` list already provides per-JID filtering, but domain-level rejection adds an additional security layer. A new config option controls this:
+- **Default: own domain only** — When `allowed_domains` is not set, only messages from the agent's own XMPP domain are accepted. The domain is inferred automatically from the JID (client mode) or component domain (component mode).
+- **Explicit allow list** — `allowed_domains = ["localhost", "partner.org"]` accepts messages from specific domains.
+- **Wildcard** — `allowed_domains = ["*"]` disables domain filtering (allows federation from any domain — use with caution).
+- **Layered with JID filtering** — Domain check runs first, then `allowed_jids`. Both must pass for a message to be processed.
+- **Applies to** — 1:1 chat messages and presence subscription requests. MUC messages are already filtered by room configuration.
+- **Startup logging** — The effective domain policy is logged at startup.
 
 ```toml
 [agent]
-# Only accept messages from these domains (default: server domain only)
-# Set to ["*"] to allow federation (use with caution)
-allowed_domains = ["localhost"]
+# Only accept messages from these domains (default: agent's own domain)
+# allowed_domains = ["localhost", "partner.example.com"]
+# Use ["*"] to allow all domains (not recommended in production)
 ```
-
-If `allowed_domains` is not set, the agent infers it from its own JID or component domain.
 
 ### Slash commands ✓
 
@@ -132,7 +131,7 @@ The agent can do things beyond conversation.
 
 - [ ] Skill trait and registry
 - [ ] LLM tool use integration (agentic loop)
-- [ ] Model tiering (route tasks to appropriate model by complexity/cost)
+- [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides
 - [ ] `LlmClient` trait + Ollama provider (local models via Ollama API)
 - [ ] Declarative skill capabilities (TOML manifests)
 - [ ] Action plan validation (separate from LLM)
@@ -372,6 +371,38 @@ A typical flow for image analysis:
 2. Runtime detects attachment → routes to `vision` tier
 3. Vision model analyzes → returns text
 4. If follow-up conversation → drops back to `standard` tier
+
+#### Sub-agent model overrides
+
+When a skill or delegated task spawns a sub-agent (an independent LLM call chain with its own system prompt and context), the operator can assign it a specific model that differs from the tier defaults. This gives fine-grained control over cost and capability per sub-agent:
+
+```toml
+[llm.tiers]
+heavy = "anthropic:claude-sonnet-4-5-20250929"
+standard = "anthropic:claude-sonnet-4-5-20250929"
+light = "ollama:llama3.1:8b"
+
+# Per sub-agent model overrides
+[llm.agents.code-reviewer]
+model = "anthropic:claude-sonnet-4-5-20250929"
+
+[llm.agents.summarizer]
+model = "ollama:llama3.1:8b"
+
+[llm.agents.translator]
+model = "ollama:mistral:7b"
+```
+
+Resolution order: `[llm.agents.<name>].model` → skill manifest `tier` → `[llm.tiers]` default.
+
+**Use cases:**
+
+- **Cost control** — A summarizer sub-agent runs on a cheap local model, while a code-review sub-agent uses the strongest reasoning model. The operator chooses per sub-agent rather than per tier.
+- **Specialization** — A translator sub-agent uses a model fine-tuned for multilingual tasks. A math sub-agent uses a model with strong arithmetic capabilities. Each sub-agent gets the best model for its job.
+- **Development vs. production** — During development, override all sub-agents to use a local Ollama model for fast iteration. In production, point critical sub-agents at Claude while keeping routine ones local.
+- **Agent-to-agent federation (v1.0)** — When agent A delegates a task to agent B, agent B's model config is independent. Sub-agent overrides are the single-process version of this pattern — they establish the config shape that later maps to federated agents.
+
+Sub-agent overrides compose with tier escalation: a sub-agent can start at its configured model but escalate to `heavy` if the agentic loop determines the task requires deeper reasoning.
 
 ### Local models via Ollama
 

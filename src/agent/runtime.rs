@@ -103,6 +103,15 @@ impl AgentRuntime {
                         let response = if clean_body.starts_with('/') {
                             self.handle_command(&msg.from, &clean_body)
                         } else {
+                            // Send <composing/> to the room before the LLM call
+                            let _ = cmd_tx
+                                .send(XmppCommand::SendChatState {
+                                    to: bare_from.to_string(),
+                                    state: ChatState::Composing,
+                                    msg_type: "groupchat".to_string(),
+                                })
+                                .await;
+
                             self.handle_muc_message(bare_from, &clean_body).await
                         };
 
@@ -124,6 +133,14 @@ impl AgentRuntime {
                             }
                             Err(e) => {
                                 error!("Error processing MUC message: {e}");
+                                // Send <paused/> to indicate the agent stopped generating
+                                let _ = cmd_tx
+                                    .send(XmppCommand::SendChatState {
+                                        to: room_jid.clone(),
+                                        state: ChatState::Paused,
+                                        msg_type: "groupchat".to_string(),
+                                    })
+                                    .await;
                                 let _ = cmd_tx
                                     .send(XmppCommand::SendMucMessage {
                                         to: room_jid,
@@ -135,7 +152,16 @@ impl AgentRuntime {
                     } else {
                         // ── 1:1 chat message ────────────────────────
 
-                        // Authorization check
+                        // Domain-level security check (rejects cross-domain messages)
+                        if !self.config.is_domain_allowed(&msg.from) {
+                            warn!(
+                                "Cross-domain message rejected from {} (domain not allowed)",
+                                msg.from
+                            );
+                            continue;
+                        }
+
+                        // Per-JID authorization check
                         if !self.config.is_allowed(&msg.from) {
                             warn!("Unauthorized message from {}, ignoring", msg.from);
                             continue;
@@ -152,6 +178,7 @@ impl AgentRuntime {
                                 .send(XmppCommand::SendChatState {
                                     to: msg.from.clone(),
                                     state: ChatState::Composing,
+                                    msg_type: "chat".to_string(),
                                 })
                                 .await;
 
@@ -173,6 +200,7 @@ impl AgentRuntime {
                                     .send(XmppCommand::SendChatState {
                                         to: msg.from.clone(),
                                         state: ChatState::Paused,
+                                        msg_type: "chat".to_string(),
                                     })
                                     .await;
                                 let _ = cmd_tx
@@ -187,6 +215,17 @@ impl AgentRuntime {
                 }
                 XmppEvent::Presence(pres) => {
                     let bare_jid = pres.from.split('/').next().unwrap_or(&pres.from);
+
+                    // Domain-level security check for subscription requests
+                    if matches!(pres.presence_type, PresenceType::Subscribe)
+                        && !self.config.is_domain_allowed(&pres.from)
+                    {
+                        warn!(
+                            "Cross-domain subscription rejected from {bare_jid} (domain not allowed)"
+                        );
+                        continue;
+                    }
+
                     match pres.presence_type {
                         PresenceType::Subscribe => {
                             // Auto-accept subscription requests from allowed JIDs
@@ -257,7 +296,10 @@ impl AgentRuntime {
         self.memory.forget(bare_jid)
     }
 
-    /// /status — Agent status overview
+    /// /status — Agent status overview.
+    ///
+    /// The output is contextual: in a MUC room it shows room-specific info;
+    /// in a 1:1 chat it shows user-specific info.
     fn cmd_status(&self, bare_jid: &str) -> Result<String> {
         let uptime = self.start_time.elapsed();
         let hours = uptime.as_secs() / 3600;
@@ -265,24 +307,46 @@ impl AgentRuntime {
 
         let msg_count = self.memory.message_count(bare_jid)?;
         let session_count = self.memory.session_count(bare_jid)?;
-        let has_profile = self.memory.has_user_profile(bare_jid)?;
-        let has_memory = self.memory.get_user_memory(bare_jid)?.is_some();
-
-        // Workspace file presence
-        let has_instructions = self.memory.get_global_file("instructions.md")?.is_some();
-        let has_identity = self.memory.get_global_file("identity.md")?.is_some();
-        let has_personality = self.memory.get_global_file("personality.md")?.is_some();
 
         let yn = |b: bool| if b { "yes" } else { "none" };
 
-        let room_info = if self.config.rooms.is_empty() {
-            String::new()
-        } else {
-            let room_names: Vec<&str> = self.config.rooms.iter().map(|r| r.jid.as_str()).collect();
+        // Workspace file presence — contextual (checks per-JID overrides)
+        let workspace = self.memory.get_workspace_context(bare_jid)?;
+        let has_instructions = workspace.instructions.is_some();
+        let has_identity = workspace.identity.is_some();
+        let has_personality = workspace.personality.is_some();
+
+        let is_room = self.config.find_room(bare_jid).is_some();
+
+        // Context-specific section: room info vs. user info
+        let context_info = if is_room {
             format!(
-                "\nMUC rooms: {} ({})",
-                self.config.rooms.len(),
-                room_names.join(", ")
+                "Room: {bare_jid}\n\
+                 Room messages: {msg_count}\n\
+                 Archived sessions: {session_count}"
+            )
+        } else {
+            let has_profile = self.memory.has_user_profile(bare_jid)?;
+            let has_memory = self.memory.get_user_memory(bare_jid)?.is_some();
+            format!(
+                "Your session: {msg_count} messages\n\
+                 Archived sessions: {session_count}\n\
+                 User profile: {}\n\
+                 User memory: {}",
+                yn(has_profile),
+                yn(has_memory),
+            )
+        };
+
+        // Domain security info
+        let domain_info = if self.config.agent.allowed_domains.is_empty() {
+            format!("Allowed domains: {} (default)", self.config.server.domain())
+        } else if self.config.agent.allowed_domains.iter().any(|d| d == "*") {
+            "Allowed domains: * (all)".to_string()
+        } else {
+            format!(
+                "Allowed domains: {}",
+                self.config.agent.allowed_domains.join(", ")
             )
         };
 
@@ -291,17 +355,13 @@ impl AgentRuntime {
              Uptime: {hours}h {minutes}m\n\
              Mode: {}\n\
              LLM: {} ({})\n\
-             Your session: {msg_count} messages\n\
-             Archived sessions: {session_count}\n\
-             User profile: {}\n\
-             User memory: {}\n\
-             Workspace: instructions={}, identity={}, personality={}{room_info}",
+             {context_info}\n\
+             Workspace: instructions={}, identity={}, personality={}\n\
+             {domain_info}",
             self.config.agent.name,
             self.config.server.mode_description(),
             self.config.llm.provider,
             self.config.llm.model,
-            yn(has_profile),
-            yn(has_memory),
             yn(has_instructions),
             yn(has_identity),
             yn(has_personality),
@@ -514,6 +574,7 @@ mod tests {
             agent: AgentConfig {
                 name: "Test Agent".to_string(),
                 allowed_jids: vec!["admin@localhost".to_string()],
+                allowed_domains: vec![],
             },
             memory: MemoryConfig {
                 backend: "markdown".to_string(),
@@ -615,22 +676,34 @@ mod tests {
     }
 
     #[test]
-    fn test_status_with_rooms() {
+    fn test_status_in_room_context() {
         let (mut rt, _tmp) = test_runtime();
-        rt.config.rooms = vec![
-            RoomConfig {
-                jid: "lobby@conference.localhost".to_string(),
-                nick: "bot".to_string(),
-            },
-            RoomConfig {
-                jid: "dev@conference.localhost".to_string(),
-                nick: "bot".to_string(),
-            },
-        ];
+        rt.config.rooms = vec![RoomConfig {
+            jid: "lobby@conference.localhost".to_string(),
+            nick: "bot".to_string(),
+        }];
+        // Status from a room JID shows room-specific info
+        let result = rt
+            .handle_command("lobby@conference.localhost/alice", "/status")
+            .unwrap();
+        assert!(result.contains("Room: lobby@conference.localhost"));
+        assert!(result.contains("Room messages:"));
+        // Should NOT show user profile/memory fields
+        assert!(!result.contains("User profile:"));
+        assert!(!result.contains("User memory:"));
+    }
+
+    #[test]
+    fn test_status_in_direct_chat_context() {
+        let (rt, _tmp) = test_runtime();
         let result = rt.handle_command("admin@localhost", "/status").unwrap();
-        assert!(result.contains("MUC rooms: 2"));
-        assert!(result.contains("lobby@conference.localhost"));
-        assert!(result.contains("dev@conference.localhost"));
+        // Should show user-specific info
+        assert!(result.contains("Your session:"));
+        assert!(result.contains("User profile:"));
+        assert!(result.contains("User memory:"));
+        // Should NOT show room-specific fields
+        assert!(!result.contains("Room:"));
+        assert!(!result.contains("Room messages:"));
     }
 
     // ── Slash command tests ─────────────────────────────
@@ -848,6 +921,7 @@ mod tests {
         assert!(result.contains("User profile: none"));
         assert!(result.contains("User memory: none"));
         assert!(result.contains("instructions=none"));
+        assert!(result.contains("Allowed domains: localhost (default)"));
     }
 
     #[test]
@@ -875,5 +949,24 @@ mod tests {
         assert!(result.contains("instructions=yes"));
         assert!(result.contains("identity=yes"));
         assert!(result.contains("personality=none"));
+    }
+
+    #[test]
+    fn test_command_status_domain_wildcard() {
+        let (mut rt, _tmp) = test_runtime();
+        rt.config.agent.allowed_domains = vec!["*".to_string()];
+
+        let result = rt.handle_command("admin@localhost", "/status").unwrap();
+        assert!(result.contains("Allowed domains: * (all)"));
+    }
+
+    #[test]
+    fn test_command_status_domain_explicit() {
+        let (mut rt, _tmp) = test_runtime();
+        rt.config.agent.allowed_domains =
+            vec!["localhost".to_string(), "partner.org".to_string()];
+
+        let result = rt.handle_command("admin@localhost", "/status").unwrap();
+        assert!(result.contains("Allowed domains: localhost, partner.org"));
     }
 }

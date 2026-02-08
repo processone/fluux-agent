@@ -22,7 +22,12 @@ pub enum XmppEvent {
 pub enum XmppCommand {
     SendMessage { to: String, body: String },
     /// Send a chat state notification (XEP-0085) — composing, paused, etc.
-    SendChatState { to: String, state: ChatState },
+    /// `msg_type` is `"chat"` for 1:1 or `"groupchat"` for MUC.
+    SendChatState {
+        to: String,
+        state: ChatState,
+        msg_type: String,
+    },
     /// Send a groupchat message to a MUC room (XEP-0045)
     SendMucMessage { to: String, body: String },
     /// Join a MUC room (XEP-0045)
@@ -224,12 +229,16 @@ impl XmppComponent {
                     XmppCommand::SendMessage { to, body } => {
                         stanzas::build_message(Some(&domain), &to, &body, None)
                     }
-                    XmppCommand::SendChatState { to, state } => match state {
+                    XmppCommand::SendChatState {
+                        to,
+                        state,
+                        msg_type,
+                    } => match state {
                         ChatState::Composing => {
-                            stanzas::build_chat_state_composing(Some(&domain), &to)
+                            stanzas::build_chat_state_composing(Some(&domain), &to, &msg_type)
                         }
                         ChatState::Paused => {
-                            stanzas::build_chat_state_paused(Some(&domain), &to)
+                            stanzas::build_chat_state_paused(Some(&domain), &to, &msg_type)
                         }
                     },
                     XmppCommand::SendMucMessage { to, body } => {

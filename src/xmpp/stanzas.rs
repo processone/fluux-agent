@@ -44,12 +44,13 @@ pub fn build_message(from: Option<&str>, to: &str, body: &str, id: Option<&str>)
 /// Builds a standalone `<composing/>` chat state notification.
 /// Sent when the agent starts generating a response (LLM call begins).
 /// `from` is Some for component mode, None for C2S.
-pub fn build_chat_state_composing(from: Option<&str>, to: &str) -> String {
+/// `msg_type` is `"chat"` for 1:1 or `"groupchat"` for MUC.
+pub fn build_chat_state_composing(from: Option<&str>, to: &str, msg_type: &str) -> String {
     let from_attr = from
         .map(|f| format!(" from='{f}'"))
         .unwrap_or_default();
     format!(
-        "<message{from_attr} to='{to}' type='chat'>\
+        "<message{from_attr} to='{to}' type='{msg_type}'>\
          <composing xmlns='http://jabber.org/protocol/chatstates'/>\
          </message>"
     )
@@ -59,12 +60,13 @@ pub fn build_chat_state_composing(from: Option<&str>, to: &str) -> String {
 /// Sent when the agent stops generating without sending a message
 /// (e.g., error during LLM call, or cancelled request).
 /// `from` is Some for component mode, None for C2S.
-pub fn build_chat_state_paused(from: Option<&str>, to: &str) -> String {
+/// `msg_type` is `"chat"` for 1:1 or `"groupchat"` for MUC.
+pub fn build_chat_state_paused(from: Option<&str>, to: &str, msg_type: &str) -> String {
     let from_attr = from
         .map(|f| format!(" from='{f}'"))
         .unwrap_or_default();
     format!(
-        "<message{from_attr} to='{to}' type='chat'>\
+        "<message{from_attr} to='{to}' type='{msg_type}'>\
          <paused xmlns='http://jabber.org/protocol/chatstates'/>\
          </message>"
     )
@@ -290,6 +292,7 @@ pub fn build_muc_join(room_jid: &str, nick: &str, from: Option<&str>) -> String 
 
 /// Builds a groupchat message for a MUC room (XEP-0045).
 /// `from` is Some for component mode, None for C2S.
+/// Includes `<active/>` chat state (XEP-0085) to clear the typing indicator.
 pub fn build_muc_message(from: Option<&str>, to: &str, body: &str) -> String {
     let from_attr = from
         .map(|f| format!(" from='{f}'"))
@@ -297,6 +300,7 @@ pub fn build_muc_message(from: Option<&str>, to: &str, body: &str) -> String {
     format!(
         "<message{from_attr} to='{to}' type='groupchat'>\
          <body>{body}</body>\
+         <active xmlns='http://jabber.org/protocol/chatstates'/>\
          </message>"
     )
 }
@@ -575,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_build_chat_state_composing_c2s() {
-        let xml = build_chat_state_composing(None, "user@localhost");
+        let xml = build_chat_state_composing(None, "user@localhost", "chat");
         assert!(xml.contains("to='user@localhost'"));
         assert!(xml.contains("<composing xmlns='http://jabber.org/protocol/chatstates'/>"));
         assert!(xml.contains("type='chat'"));
@@ -585,15 +589,23 @@ mod tests {
 
     #[test]
     fn test_build_chat_state_composing_component() {
-        let xml = build_chat_state_composing(Some("agent.localhost"), "user@localhost");
+        let xml = build_chat_state_composing(Some("agent.localhost"), "user@localhost", "chat");
         assert!(xml.contains("from='agent.localhost'"));
         assert!(xml.contains("to='user@localhost'"));
         assert!(xml.contains("<composing xmlns='http://jabber.org/protocol/chatstates'/>"));
     }
 
     #[test]
+    fn test_build_chat_state_composing_groupchat() {
+        let xml = build_chat_state_composing(None, "lobby@conference.localhost", "groupchat");
+        assert!(xml.contains("to='lobby@conference.localhost'"));
+        assert!(xml.contains("type='groupchat'"));
+        assert!(xml.contains("<composing xmlns='http://jabber.org/protocol/chatstates'/>"));
+    }
+
+    #[test]
     fn test_build_chat_state_paused_c2s() {
-        let xml = build_chat_state_paused(None, "user@localhost");
+        let xml = build_chat_state_paused(None, "user@localhost", "chat");
         assert!(xml.contains("to='user@localhost'"));
         assert!(xml.contains("<paused xmlns='http://jabber.org/protocol/chatstates'/>"));
         assert!(xml.contains("type='chat'"));
@@ -603,8 +615,16 @@ mod tests {
 
     #[test]
     fn test_build_chat_state_paused_component() {
-        let xml = build_chat_state_paused(Some("agent.localhost"), "user@localhost");
+        let xml = build_chat_state_paused(Some("agent.localhost"), "user@localhost", "chat");
         assert!(xml.contains("from='agent.localhost'"));
+        assert!(xml.contains("<paused xmlns='http://jabber.org/protocol/chatstates'/>"));
+    }
+
+    #[test]
+    fn test_build_chat_state_paused_groupchat() {
+        let xml = build_chat_state_paused(None, "lobby@conference.localhost", "groupchat");
+        assert!(xml.contains("to='lobby@conference.localhost'"));
+        assert!(xml.contains("type='groupchat'"));
         assert!(xml.contains("<paused xmlns='http://jabber.org/protocol/chatstates'/>"));
     }
 
@@ -920,6 +940,7 @@ mod tests {
         assert!(xml.contains("to='lobby@conference.localhost'"));
         assert!(xml.contains("type='groupchat'"));
         assert!(xml.contains("<body>Hello room!</body>"));
+        assert!(xml.contains("<active xmlns='http://jabber.org/protocol/chatstates'/>"));
     }
 
     #[test]
@@ -928,6 +949,7 @@ mod tests {
         assert!(xml.contains("from='agent.localhost'"));
         assert!(xml.contains("type='groupchat'"));
         assert!(xml.contains("<body>Hi!</body>"));
+        assert!(xml.contains("<active xmlns='http://jabber.org/protocol/chatstates'/>"));
     }
 
     #[test]

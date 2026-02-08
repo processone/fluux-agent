@@ -51,6 +51,17 @@ async fn main() -> Result<()> {
         "Allowed JIDs: {}",
         config.agent.allowed_jids.join(", ")
     );
+    if config.agent.allowed_domains.is_empty() {
+        info!(
+            "Allowed domains: {} (default — own domain only)",
+            config.server.domain()
+        );
+    } else {
+        info!(
+            "Allowed domains: {}",
+            config.agent.allowed_domains.join(", ")
+        );
+    }
     if !config.rooms.is_empty() {
         info!(
             "MUC rooms: {}",

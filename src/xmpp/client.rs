@@ -284,12 +284,16 @@ impl XmppClient {
                     XmppCommand::SendMessage { to, body } => {
                         stanzas::build_message(None, &to, &body, None)
                     }
-                    XmppCommand::SendChatState { to, state } => match state {
+                    XmppCommand::SendChatState {
+                        to,
+                        state,
+                        msg_type,
+                    } => match state {
                         ChatState::Composing => {
-                            stanzas::build_chat_state_composing(None, &to)
+                            stanzas::build_chat_state_composing(None, &to, &msg_type)
                         }
                         ChatState::Paused => {
-                            stanzas::build_chat_state_paused(None, &to)
+                            stanzas::build_chat_state_paused(None, &to, &msg_type)
                         }
                     },
                     XmppCommand::SendMucMessage { to, body } => {

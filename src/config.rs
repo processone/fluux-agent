@@ -78,6 +78,11 @@ pub struct AgentConfig {
     pub name: String,
     /// JIDs allowed to talk to the agent
     pub allowed_jids: Vec<String>,
+    /// Domains allowed to send messages to the agent.
+    /// If omitted, only the agent's own domain is allowed (safe default).
+    /// Set to ["*"] to allow all domains (federation — use with caution).
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -112,6 +117,21 @@ impl ServerConfig {
             }
         }
     }
+
+    /// Returns the agent's own XMPP domain.
+    ///
+    /// - Component mode: the component domain (e.g. "agent.localhost")
+    /// - Client mode: the domain part of the JID (e.g. "localhost" from "bot@localhost")
+    pub fn domain(&self) -> &str {
+        match &self.mode {
+            ConnectionMode::Component {
+                component_domain, ..
+            } => component_domain.as_str(),
+            ConnectionMode::Client { jid, .. } => {
+                jid.split('@').nth(1).unwrap_or(jid.as_str())
+            }
+        }
+    }
 }
 
 impl Config {
@@ -135,6 +155,29 @@ impl Config {
         self.agent.allowed_jids.iter().any(|allowed| {
             allowed == bare || allowed == "*"
         })
+    }
+
+    /// Checks if a JID's domain is allowed.
+    ///
+    /// If `allowed_domains` is empty (the default), only the agent's own domain
+    /// is accepted. If `allowed_domains` contains `"*"`, all domains pass.
+    /// Otherwise, the sender's domain must be in the list.
+    pub fn is_domain_allowed(&self, jid: &str) -> bool {
+        // Extract domain from the JID (bare or full)
+        let bare = jid.split('/').next().unwrap_or(jid);
+        let sender_domain = bare.split('@').nth(1).unwrap_or(bare);
+
+        if self.agent.allowed_domains.is_empty() {
+            // Default: only accept the agent's own domain
+            sender_domain == self.server.domain()
+        } else if self.agent.allowed_domains.iter().any(|d| d == "*") {
+            true
+        } else {
+            self.agent
+                .allowed_domains
+                .iter()
+                .any(|d| d == sender_domain)
+        }
     }
 }
 
@@ -164,6 +207,7 @@ mod tests {
             agent: AgentConfig {
                 name: "Test Agent".to_string(),
                 allowed_jids: jids.into_iter().map(String::from).collect(),
+                allowed_domains: vec![],
             },
             memory: MemoryConfig {
                 backend: "markdown".to_string(),
@@ -274,5 +318,88 @@ mod tests {
     fn test_find_room_not_found() {
         let config = config_with_jids(vec![]);
         assert!(config.find_room("nonexistent@conference.localhost").is_none());
+    }
+
+    // ── domain() tests ──────────────────────────────────
+
+    #[test]
+    fn test_domain_client_mode() {
+        let config = config_with_jids(vec![]);
+        assert_eq!(config.server.domain(), "localhost");
+    }
+
+    #[test]
+    fn test_domain_component_mode() {
+        let server = ServerConfig {
+            host: "localhost".to_string(),
+            port: 5275,
+            mode: ConnectionMode::Component {
+                component_domain: "agent.example.com".to_string(),
+                component_secret: "secret".to_string(),
+            },
+        };
+        assert_eq!(server.domain(), "agent.example.com");
+    }
+
+    // ── is_domain_allowed() tests ───────────────────────
+
+    #[test]
+    fn test_domain_default_accepts_own_domain() {
+        // No allowed_domains configured → only own domain accepted
+        let config = config_with_jids(vec!["*"]);
+        assert!(config.is_domain_allowed("alice@localhost"));
+        assert!(config.is_domain_allowed("alice@localhost/res"));
+    }
+
+    #[test]
+    fn test_domain_default_rejects_foreign_domain() {
+        let config = config_with_jids(vec!["*"]);
+        assert!(!config.is_domain_allowed("hacker@evil.com"));
+        assert!(!config.is_domain_allowed("user@other.org/mobile"));
+    }
+
+    #[test]
+    fn test_domain_wildcard_allows_all() {
+        let mut config = config_with_jids(vec!["*"]);
+        config.agent.allowed_domains = vec!["*".to_string()];
+        assert!(config.is_domain_allowed("anyone@anywhere.com"));
+        assert!(config.is_domain_allowed("user@evil.org/res"));
+    }
+
+    #[test]
+    fn test_domain_explicit_list() {
+        let mut config = config_with_jids(vec!["*"]);
+        config.agent.allowed_domains = vec![
+            "localhost".to_string(),
+            "partner.org".to_string(),
+        ];
+        assert!(config.is_domain_allowed("alice@localhost"));
+        assert!(config.is_domain_allowed("bob@partner.org/phone"));
+        assert!(!config.is_domain_allowed("hacker@evil.com"));
+    }
+
+    #[test]
+    fn test_domain_component_mode_default() {
+        // Component mode: own domain is "agent.localhost"
+        let mut config = config_with_jids(vec!["*"]);
+        config.server = ServerConfig {
+            host: "localhost".to_string(),
+            port: 5275,
+            mode: ConnectionMode::Component {
+                component_domain: "agent.localhost".to_string(),
+                component_secret: "secret".to_string(),
+            },
+        };
+        // With no allowed_domains, only agent.localhost is accepted
+        assert!(config.is_domain_allowed("user@agent.localhost"));
+        assert!(!config.is_domain_allowed("user@localhost"));
+        assert!(!config.is_domain_allowed("user@evil.com"));
+    }
+
+    #[test]
+    fn test_domain_check_strips_resource() {
+        let config = config_with_jids(vec!["*"]);
+        assert!(config.is_domain_allowed("alice@localhost/Conversations.abc"));
+        assert!(!config.is_domain_allowed("alice@evil.com/Conversations.abc"));
     }
 }

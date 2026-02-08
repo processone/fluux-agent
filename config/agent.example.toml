@@ -41,6 +41,11 @@ name = "Fluux Agent"
 allowed_jids = [
     "admin@localhost",
 ]
+# Allowed sender domains (cross-domain message rejection).
+# If omitted, only the agent's own domain is accepted (safe default).
+# Uncomment to allow federation from specific domains:
+# allowed_domains = ["localhost", "partner.example.com"]
+# Use ["*"] to allow all domains (not recommended in production)
 
 [memory]
 # Memory backend: "markdown" (human-readable files, OpenClaw-compatible)
