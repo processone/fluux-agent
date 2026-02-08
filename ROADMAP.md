@@ -24,6 +24,7 @@ The minimum viable agent: connect, authenticate, converse, remember.
 - [x] Slash commands (runtime-intercepted, never reach the LLM)
 - [x] Presence subscription for allowed JIDs (auto-subscribe + auto-accept)
 - [x] Typing indicators (outbound `<composing/>` / `<paused/>` / `<active/>`, XEP-0085)
+- [x] MUC room joining (XEP-0045) — join configured rooms, respond to mentions, full room context
 - [ ] Cross-domain message rejection (security default) — **next**
 - [ ] Reconnection with exponential backoff
 
@@ -408,7 +409,7 @@ The provider prefix (`anthropic:`, `ollama:`) in the tier string tells the runti
 
 The agent initiates, not just responds.
 
-- [ ] Groupchat support (MUC, XEP-0045) — join rooms, respond to mentions, use room-scoped memory
+- [ ] Advanced MUC — room-specific system prompts, invite handling, activation modes (mention vs. all)
 - [ ] React to user presence changes (e.g., greet on login, trigger deferred tasks when user comes online)
 - [ ] React to user PEP events (XEP-0163) — mood, activity, tune, location, avatar changes
 - [ ] Cron-based scheduled tasks (via PubSub or internal scheduler)
@@ -433,25 +434,21 @@ XMPP Personal Eventing Protocol (PEP) lets users publish rich status information
 - **Proactive suggestions** — Location changes could trigger travel-related reminders. Activity changes could prompt relevant information.
 - **Privacy-first** — PEP events are only processed for allowed JIDs. The agent never stores or forwards PEP data to third parties. PEP subscription is opt-in via config.
 
-### Groupchat support (MUC, XEP-0045)
+### Advanced MUC (XEP-0045)
 
-The agent can join XMPP Multi-User Chat rooms and participate in group conversations, using **room-scoped memory** instead of per-user memory:
+Basic MUC support (join rooms, respond to mentions, room-scoped memory with full conversation context) is implemented in **v0.1**. In v0.3, we extend it with:
 
-- **Room memory** — `{room_jid}/history.md` + `{room_jid}/context.md`. The agent builds shared context from group discussions (project names, decisions, recurring topics). This is separate from 1:1 per-user memory.
-- **Mention-based activation** — In a group room, the agent only responds when mentioned (e.g., `@agent what's the status?`). This prevents noise and respects the group conversation flow.
-- **Room configuration** — Rooms the agent should join are declared in TOML. The agent joins on connect and sends presence to the room.
-- **Participant awareness** — The agent knows who is in the room (via MUC presence) and can address responses to specific participants.
-- **Use cases** — Team standup assistant, project knowledge base, shared action tracking, meeting summaries posted to the room.
+- **Room-specific system prompts** — A `{room_jid}/instructions.md` file that overrides the global instructions for that room. Useful for specialized rooms (e.g., a support room gets support-specific instructions).
+- **Activation modes** — Configurable per-room: `"mention"` (default, respond only when @mentioned) vs. `"all"` (respond to every message). Useful for rooms where the agent is the primary assistant.
+- **Invite handling** — The agent can accept MUC invitations from allowed JIDs and auto-join.
+- **Participant awareness** — Track MUC occupant list (via presence) and address responses to specific participants.
+- **Leave/rejoin** — Handle room kicks, disconnections, and automatic rejoin with backoff.
 
 ```toml
-[rooms]
-# Rooms the agent joins on connect
-join = ["dev@conference.localhost", "standup@conference.localhost"]
-
-[rooms."dev@conference.localhost"]
+[[rooms]]
+jid = "dev@conference.localhost"
 nick = "fluux-agent"
-# How the agent is activated: "mention" (default), "all" (respond to every message)
-activation = "mention"
+activation = "mention"       # "mention" (default) or "all"
 ```
 
 ### Cost estimation and per-JID quota

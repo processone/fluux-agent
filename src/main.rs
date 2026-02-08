@@ -51,6 +51,12 @@ async fn main() -> Result<()> {
         "Allowed JIDs: {}",
         config.agent.allowed_jids.join(", ")
     );
+    if !config.rooms.is_empty() {
+        info!(
+            "MUC rooms: {}",
+            config.rooms.iter().map(|r| format!("{} (as {})", r.jid, r.nick)).collect::<Vec<_>>().join(", ")
+        );
+    }
 
     // Initialize memory
     let memory = Memory::open(&config.memory.path)?;

@@ -7,6 +7,23 @@ pub struct Config {
     pub llm: LlmConfig,
     pub agent: AgentConfig,
     pub memory: MemoryConfig,
+    /// MUC rooms to join on connect (XEP-0045)
+    #[serde(default)]
+    pub rooms: Vec<RoomConfig>,
+}
+
+/// Configuration for a MUC room (XEP-0045)
+#[derive(Debug, Deserialize, Clone)]
+pub struct RoomConfig {
+    /// Room JID, e.g. "lobby@conference.localhost"
+    pub jid: String,
+    /// Bot's nickname in the room
+    #[serde(default = "default_room_nick")]
+    pub nick: String,
+}
+
+fn default_room_nick() -> String {
+    "fluux-agent".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -106,6 +123,11 @@ impl Config {
         Ok(config)
     }
 
+    /// Returns the room config for a given room JID, if configured
+    pub fn find_room(&self, room_jid: &str) -> Option<&RoomConfig> {
+        self.rooms.iter().find(|r| r.jid == room_jid)
+    }
+
     /// Checks if a JID is allowed to talk to the agent
     pub fn is_allowed(&self, jid: &str) -> bool {
         // Extract bare JID (without resource)
@@ -147,6 +169,7 @@ mod tests {
                 backend: "markdown".to_string(),
                 path: PathBuf::from("./data/memory"),
             },
+            rooms: vec![],
         }
     }
 
@@ -225,5 +248,31 @@ mod tests {
             server.mode_description(),
             "component (agent.localhost)"
         );
+    }
+
+    // ── find_room tests ──────────────────────────────────
+
+    #[test]
+    fn test_find_room_found() {
+        let mut config = config_with_jids(vec!["admin@localhost"]);
+        config.rooms = vec![
+            RoomConfig {
+                jid: "lobby@conference.localhost".to_string(),
+                nick: "bot".to_string(),
+            },
+            RoomConfig {
+                jid: "dev@conference.localhost".to_string(),
+                nick: "fluux-agent".to_string(),
+            },
+        ];
+        let room = config.find_room("dev@conference.localhost").unwrap();
+        assert_eq!(room.jid, "dev@conference.localhost");
+        assert_eq!(room.nick, "fluux-agent");
+    }
+
+    #[test]
+    fn test_find_room_not_found() {
+        let config = config_with_jids(vec![]);
+        assert!(config.find_room("nonexistent@conference.localhost").is_none());
     }
 }

@@ -48,6 +48,18 @@ backend = "markdown"
 # Base directory for memory files (one subdirectory per user JID)
 path = "./data/memory"
 
+# --- Multi-User Chat (MUC, XEP-0045) ---
+# The agent joins these rooms on connect and responds to mentions.
+# Each room gets its own isolated memory directory (room JID as key).
+
+# [[rooms]]
+# jid = "lobby@conference.localhost"
+# nick = "fluux-agent"       # Bot's nickname in the room (default: "fluux-agent")
+
+# [[rooms]]
+# jid = "dev@conference.localhost"
+# nick = "fluux-agent"
+
 # --- Future sections (v0.2+) ---
 
 # [sandbox]

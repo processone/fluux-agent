@@ -79,9 +79,9 @@ Fluux Agent starts as a personal AI assistant — one user, one agent, one LLM. 
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| **v0.1** | XMPP component + C2S client + agentic loop + Claude API + markdown memory + sessions + slash commands | 🚧 In progress |
+| **v0.1** | XMPP component + C2S client + agentic loop + Claude API + markdown memory + sessions + slash commands + MUC rooms | 🚧 In progress |
 | **v0.2** | Skills system, model tiering, Ollama support, proactive context learning, prompt injection detection | Planned |
-| **v0.3** | Proactivity (cron via PubSub, heartbeat) | Planned |
+| **v0.3** | Proactivity (cron via PubSub, heartbeat), advanced MUC (room-specific prompts, invite handling) | Planned |
 | **v0.4** | Wasm sandbox (wasmtime) + Landlock | Planned |
 | **v0.5** | Agent protocol (`urn:fluux:agent:0`) — discovery, execute, confirm | Planned |
 | **v1.0** | Agent-to-agent federation, complete documentation | Planned |
@@ -178,13 +178,13 @@ Memory is stored as human-readable markdown files — workspace files for global
 
 Messages starting with `/` are intercepted by the runtime and never reach the LLM. They cost zero API calls and respond instantly.
 
-| Command | Description |
-|---------|-------------|
-| `/new` or `/reset` | Archive the current conversation and start a fresh session |
-| `/forget` | Erase your history, profile, and memory (archived sessions are preserved) |
-| `/status` | Agent uptime, connection mode, LLM model, session stats |
-| `/ping` | Check if the agent is alive |
-| `/help` | List available commands |
+| Command            | Description                                                               |
+|--------------------|---------------------------------------------------------------------------|
+| `/new` or `/reset` | Archive the current conversation and start a fresh session                |
+| `/forget`          | Erase your history, profile, and memory (archived sessions are preserved) |
+| `/status`          | Agent uptime, connection mode, LLM model, session stats                   |
+| `/ping`            | Check if the agent is alive                                               |
+| `/help`            | List available commands                                                   |
 
 ## Session Management
 
@@ -213,6 +213,26 @@ data/memory/
 Global workspace files (`instructions.md`, `identity.md`, `personality.md`) are shared across all users and let admins customize the agent without touching code. When no workspace files exist, a built-in default prompt is used. Per-JID directories are strictly isolated — each user (or room) has their own `user.md`, `memory.md`, and conversation history.
 
 See [`data/memory/README.md`](data/memory/README.md) for the full workspace reference, file format details, and OpenClaw migration guide.
+
+## Multi-User Chat (MUC)
+
+Fluux Agent can join XMPP group chat rooms (XEP-0045) and respond when mentioned.
+
+### Configuration
+
+```toml
+[[rooms]]
+jid = "lobby@conference.localhost"
+nick = "FluuxBot"
+
+[[rooms]]
+jid = "dev@conference.localhost"
+nick = "FluuxBot"
+```
+
+The agent joins configured rooms on connect. It records all room messages for context and responds when its nickname is mentioned (e.g., `@FluuxBot what's the status?` or `FluuxBot: hello`). This means the LLM sees the full conversation when it's asked a question, not just the mention.
+
+Each room has its own isolated memory directory, just like 1:1 conversations — the room JID is used as the memory key. All participants in the same room share conversation context.
 
 ## Project Structure
 

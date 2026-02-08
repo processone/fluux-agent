@@ -292,6 +292,12 @@ impl XmppClient {
                             stanzas::build_chat_state_paused(None, &to)
                         }
                     },
+                    XmppCommand::SendMucMessage { to, body } => {
+                        stanzas::build_muc_message(None, &to, &body)
+                    }
+                    XmppCommand::JoinMuc { room, nick } => {
+                        stanzas::build_muc_join(&room, &nick, None)
+                    }
                     XmppCommand::SendRaw(raw) => raw,
                 };
 
@@ -321,10 +327,14 @@ impl XmppClient {
         let after_tag = &buffer[start..];
 
         // Check for self-closing first: <presence ... />
+        // A self-closing tag has /> before any > that opens the tag body.
         if let Some(close_pos) = after_tag.find("/>") {
-            // Make sure there's no </presence> before the />
-            let has_full_close = after_tag[..close_pos].contains("</presence>");
-            if !has_full_close {
+            let before_close = &after_tag[..close_pos];
+            let tag_opened = before_close
+                .find('>')
+                .map(|pos| !before_close[..pos + 1].ends_with("/>"))
+                .unwrap_or(false);
+            if !tag_opened {
                 let stanza_end = start + close_pos + "/>".len();
                 return Some((buffer[start..stanza_end].to_string(), stanza_end));
             }

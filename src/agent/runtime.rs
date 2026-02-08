@@ -5,7 +5,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::llm::{AnthropicClient, Message};
 use crate::xmpp::component::{ChatState, XmppCommand, XmppEvent};
-use crate::xmpp::stanzas::PresenceType;
+use crate::xmpp::stanzas::{MessageType, PresenceType};
 
 use super::memory::{Memory, WorkspaceContext};
 
@@ -45,57 +45,143 @@ impl AgentRuntime {
             match event {
                 XmppEvent::Connected => {
                     info!("✓ Agent is online and ready");
-                }
-                XmppEvent::Message(msg) => {
-                    // Authorization check
-                    if !self.config.is_allowed(&msg.from) {
-                        warn!("Unauthorized message from {}, ignoring", msg.from);
-                        continue;
-                    }
 
-                    info!("Processing message from {}: {}", msg.from, msg.body);
-
-                    // Slash commands are intercepted before the LLM — instant, no typing indicator
-                    let response = if msg.body.starts_with('/') {
-                        self.handle_command(&msg.from, &msg.body)
-                    } else {
-                        // Send <composing/> before the LLM call so the user sees "typing..."
+                    // Join configured MUC rooms (XEP-0045)
+                    for room in &self.config.rooms {
+                        info!("Joining MUC room: {} as {}", room.jid, room.nick);
                         let _ = cmd_tx
-                            .send(XmppCommand::SendChatState {
-                                to: msg.from.clone(),
-                                state: ChatState::Composing,
+                            .send(XmppCommand::JoinMuc {
+                                room: room.jid.clone(),
+                                nick: room.nick.clone(),
                             })
                             .await;
+                    }
+                }
+                XmppEvent::Message(msg) => {
+                    let bare_from = msg.from.split('/').next().unwrap_or(&msg.from);
+                    let is_muc = msg.message_type == MessageType::GroupChat;
 
-                        self.handle_message(&msg.from, &msg.body).await
-                    };
+                    if is_muc {
+                        // ── MUC groupchat message ───────────────────
+                        let room_config = match self.config.find_room(bare_from) {
+                            Some(rc) => rc.clone(),
+                            None => {
+                                debug!("Ignoring MUC message from unconfigured room {bare_from}");
+                                continue;
+                            }
+                        };
 
-                    match response {
-                        Ok(text) => {
-                            // The response message includes <active/> chat state,
-                            // which clears the "typing..." indicator on the client.
-                            let _ = cmd_tx
-                                .send(XmppCommand::SendMessage {
-                                    to: msg.from.clone(),
-                                    body: text,
-                                })
-                                .await;
+                        // Filter self-messages (MUC reflects bot's own messages)
+                        let sender_nick = msg.from.split('/').nth(1).unwrap_or("");
+                        if sender_nick == room_config.nick {
+                            continue;
                         }
-                        Err(e) => {
-                            error!("Error processing message: {e}");
-                            // Send <paused/> to clear "typing..." before the error message
+
+                        // Store ALL room messages to history (for full context)
+                        // Use sender's nick in the header: "### user (alice)"
+                        let sender_label = format!("{sender_nick}@muc");
+                        if let Err(e) = self.memory.store_message_with_jid(
+                            bare_from,
+                            "user",
+                            &msg.body,
+                            Some(&sender_label),
+                        ) {
+                            error!("Failed to store MUC message: {e}");
+                        }
+
+                        // Only respond if the bot is mentioned
+                        if !is_mentioned(&room_config.nick, &msg.body) {
+                            continue;
+                        }
+
+                        info!("MUC mention from {sender_nick} in {bare_from}");
+
+                        // Strip mention prefix before sending to LLM
+                        let clean_body = strip_mention(&room_config.nick, &msg.body);
+
+                        // Process via LLM using room JID as memory key
+                        let response = if clean_body.starts_with('/') {
+                            self.handle_command(&msg.from, &clean_body)
+                        } else {
+                            self.handle_muc_message(bare_from, &clean_body).await
+                        };
+
+                        let room_jid = bare_from.to_string();
+                        match response {
+                            Ok(text) => {
+                                // Store assistant response to room history
+                                if let Err(e) =
+                                    self.memory.store_message(&room_jid, "assistant", &text)
+                                {
+                                    error!("Failed to store MUC response: {e}");
+                                }
+                                let _ = cmd_tx
+                                    .send(XmppCommand::SendMucMessage {
+                                        to: room_jid,
+                                        body: text,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                error!("Error processing MUC message: {e}");
+                                let _ = cmd_tx
+                                    .send(XmppCommand::SendMucMessage {
+                                        to: room_jid,
+                                        body: format!("Sorry, an error occurred: {e}"),
+                                    })
+                                    .await;
+                            }
+                        }
+                    } else {
+                        // ── 1:1 chat message ────────────────────────
+
+                        // Authorization check
+                        if !self.config.is_allowed(&msg.from) {
+                            warn!("Unauthorized message from {}, ignoring", msg.from);
+                            continue;
+                        }
+
+                        info!("Processing message from {}: {}", msg.from, msg.body);
+
+                        // Slash commands are intercepted before the LLM
+                        let response = if msg.body.starts_with('/') {
+                            self.handle_command(&msg.from, &msg.body)
+                        } else {
+                            // Send <composing/> before the LLM call
                             let _ = cmd_tx
                                 .send(XmppCommand::SendChatState {
                                     to: msg.from.clone(),
-                                    state: ChatState::Paused,
+                                    state: ChatState::Composing,
                                 })
                                 .await;
-                            let _ = cmd_tx
-                                .send(XmppCommand::SendMessage {
-                                    to: msg.from.clone(),
-                                    body: format!("Sorry, an error occurred: {e}"),
-                                })
-                                .await;
+
+                            self.handle_message(&msg.from, &msg.body).await
+                        };
+
+                        match response {
+                            Ok(text) => {
+                                let _ = cmd_tx
+                                    .send(XmppCommand::SendMessage {
+                                        to: msg.from.clone(),
+                                        body: text,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                error!("Error processing message: {e}");
+                                let _ = cmd_tx
+                                    .send(XmppCommand::SendChatState {
+                                        to: msg.from.clone(),
+                                        state: ChatState::Paused,
+                                    })
+                                    .await;
+                                let _ = cmd_tx
+                                    .send(XmppCommand::SendMessage {
+                                        to: msg.from.clone(),
+                                        body: format!("Sorry, an error occurred: {e}"),
+                                    })
+                                    .await;
+                            }
                         }
                     }
                 }
@@ -189,6 +275,17 @@ impl AgentRuntime {
 
         let yn = |b: bool| if b { "yes" } else { "none" };
 
+        let room_info = if self.config.rooms.is_empty() {
+            String::new()
+        } else {
+            let room_names: Vec<&str> = self.config.rooms.iter().map(|r| r.jid.as_str()).collect();
+            format!(
+                "\nMUC rooms: {} ({})",
+                self.config.rooms.len(),
+                room_names.join(", ")
+            )
+        };
+
         Ok(format!(
             "{} — status\n\
              Uptime: {hours}h {minutes}m\n\
@@ -198,7 +295,7 @@ impl AgentRuntime {
              Archived sessions: {session_count}\n\
              User profile: {}\n\
              User memory: {}\n\
-             Workspace: instructions={}, identity={}, personality={}",
+             Workspace: instructions={}, identity={}, personality={}{room_info}",
             self.config.agent.name,
             self.config.server.mode_description(),
             self.config.llm.provider,
@@ -254,6 +351,32 @@ Commands:\n\
 
         info!(
             "Response to {bare_jid}: {} chars ({} tokens used)",
+            response.text.len(),
+            response.input_tokens + response.output_tokens
+        );
+
+        Ok(response.text)
+    }
+
+    /// Processes a MUC message via LLM.
+    /// The user message is already stored in history by the caller.
+    /// Returns the LLM response text (caller stores the assistant message).
+    async fn handle_muc_message(&self, room_jid: &str, _body: &str) -> Result<String> {
+        // Retrieve conversation history and workspace context
+        let history = self.memory.get_history(room_jid, MAX_HISTORY)?;
+        let workspace = self.memory.get_workspace_context(room_jid)?;
+
+        // Build system prompt
+        let system_prompt = self.build_system_prompt(&workspace);
+
+        // The user message is already the last entry in history (stored by caller)
+        let messages = history;
+
+        // Call LLM
+        let response = self.llm.complete(&system_prompt, &messages).await?;
+
+        info!(
+            "MUC response to {room_jid}: {} chars ({} tokens used)",
             response.text.len(),
             response.input_tokens + response.output_tokens
         );
@@ -319,6 +442,49 @@ Commands:\n\
     }
 }
 
+// ── MUC mention helpers ──────────────────────────────────
+
+/// Checks if the bot's nickname is mentioned in the message body.
+/// Matches: "@nick", "nick:", "nick " at start of message (case-insensitive).
+fn is_mentioned(nick: &str, body: &str) -> bool {
+    let lower_body = body.to_lowercase();
+    let lower_nick = nick.to_lowercase();
+    lower_body.contains(&format!("@{lower_nick}"))
+        || lower_body.starts_with(&format!("{lower_nick}:"))
+        || lower_body.starts_with(&format!("{lower_nick} "))
+}
+
+/// Strips the mention prefix from the message body.
+/// Removes patterns like "@nick ", "@nick: ", "nick: ", "nick " from the beginning.
+fn strip_mention(nick: &str, body: &str) -> String {
+    let lower_body = body.to_lowercase();
+    let lower_nick = nick.to_lowercase();
+
+    // Try "@nick:" or "@nick " at the beginning
+    let at_nick = format!("@{lower_nick}");
+    if lower_body.starts_with(&at_nick) {
+        let rest = &body[at_nick.len()..];
+        let trimmed = rest.trim_start_matches(':').trim_start_matches(',').trim_start();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    // Try "nick:" or "nick " at the beginning
+    if lower_body.starts_with(&format!("{lower_nick}:"))
+        || lower_body.starts_with(&format!("{lower_nick} "))
+    {
+        let rest = &body[nick.len()..];
+        let trimmed = rest.trim_start_matches(':').trim_start_matches(',').trim_start();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    // "@nick" in the middle — no stripping needed, return full body
+    body.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,12 +519,118 @@ mod tests {
                 backend: "markdown".to_string(),
                 path: tmp.path().to_path_buf(),
             },
+            rooms: vec![],
         };
 
         let llm = AnthropicClient::new(config.llm.clone());
         let memory = Memory::open(tmp.path()).unwrap();
         let runtime = AgentRuntime::new(config, llm, memory);
         (runtime, tmp)
+    }
+
+    // ── MUC mention helper tests ────────────────────────
+
+    #[test]
+    fn test_is_mentioned_at_prefix() {
+        assert!(is_mentioned("bot", "@bot what's up?"));
+        assert!(is_mentioned("bot", "hey @bot help"));
+        assert!(is_mentioned("FluuxBot", "@fluuxbot hello"));
+    }
+
+    #[test]
+    fn test_is_mentioned_colon_prefix() {
+        assert!(is_mentioned("bot", "bot: what's up?"));
+        assert!(is_mentioned("FluuxBot", "FluuxBot: help"));
+    }
+
+    #[test]
+    fn test_is_mentioned_space_prefix() {
+        assert!(is_mentioned("bot", "bot what's up?"));
+    }
+
+    #[test]
+    fn test_is_mentioned_not_mentioned() {
+        assert!(!is_mentioned("bot", "hello everyone"));
+        assert!(!is_mentioned("bot", "robotics are cool"));
+    }
+
+    #[test]
+    fn test_strip_mention_at_prefix() {
+        assert_eq!(strip_mention("bot", "@bot what's up?"), "what's up?");
+        assert_eq!(strip_mention("bot", "@bot: help me"), "help me");
+        assert_eq!(strip_mention("FluuxBot", "@FluuxBot hello"), "hello");
+    }
+
+    #[test]
+    fn test_strip_mention_colon_prefix() {
+        assert_eq!(strip_mention("bot", "bot: what's up?"), "what's up?");
+        assert_eq!(strip_mention("FluuxBot", "FluuxBot: help"), "help");
+    }
+
+    #[test]
+    fn test_strip_mention_middle_keeps_body() {
+        // "@nick" in the middle — no stripping
+        assert_eq!(
+            strip_mention("bot", "hey @bot help me"),
+            "hey @bot help me"
+        );
+    }
+
+    #[test]
+    fn test_is_mentioned_case_insensitive() {
+        assert!(is_mentioned("FluuxBot", "@fluuxbot help"));
+        assert!(is_mentioned("bot", "@BOT help"));
+        assert!(is_mentioned("Bot", "bot: hello"));
+        assert!(is_mentioned("BOT", "Bot: hello"));
+    }
+
+    #[test]
+    fn test_is_mentioned_with_punctuation() {
+        // "@bot!" — the @bot substring is found
+        assert!(is_mentioned("bot", "@bot! help me"));
+        assert!(is_mentioned("bot", "@bot, please help"));
+        assert!(is_mentioned("bot", "@bot? are you there"));
+    }
+
+    #[test]
+    fn test_is_mentioned_at_end_of_message() {
+        assert!(is_mentioned("bot", "hey @bot"));
+    }
+
+    #[test]
+    fn test_strip_mention_comma_after_at() {
+        assert_eq!(strip_mention("bot", "@bot, help me"), "help me");
+    }
+
+    #[test]
+    fn test_strip_mention_only_mention_returns_full_body() {
+        // "@bot" with nothing after → returns full body (no stripping)
+        assert_eq!(strip_mention("bot", "@bot"), "@bot");
+    }
+
+    #[test]
+    fn test_strip_mention_case_insensitive() {
+        assert_eq!(strip_mention("FluuxBot", "@fluuxbot hello"), "hello");
+        assert_eq!(strip_mention("BOT", "bot: hello"), "hello");
+    }
+
+    #[test]
+    fn test_status_with_rooms() {
+        let (mut rt, _tmp) = test_runtime();
+        rt.config.rooms = vec![
+            RoomConfig {
+                jid: "lobby@conference.localhost".to_string(),
+                nick: "bot".to_string(),
+            },
+            RoomConfig {
+                jid: "dev@conference.localhost".to_string(),
+                nick: "bot".to_string(),
+            },
+        ];
+        let result = rt.handle_command("admin@localhost", "/status").unwrap();
+        assert!(result.contains("MUC rooms: 2"));
+        assert!(result.contains("lobby@conference.localhost"));
+        assert!(result.contains("dev@conference.localhost"));
     }
 
     // ── Slash command tests ─────────────────────────────

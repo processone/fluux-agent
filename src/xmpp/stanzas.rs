@@ -2,6 +2,13 @@
 /// Manual XML handling — we only need a subset for both
 /// component (XEP-0114) and C2S client protocols.
 
+/// Message type — distinguishes 1:1 chat from MUC groupchat
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageType {
+    Chat,
+    GroupChat,
+}
+
 /// Parsed incoming message
 #[derive(Debug, Clone)]
 pub struct IncomingMessage {
@@ -9,6 +16,7 @@ pub struct IncomingMessage {
     pub to: String,
     pub body: String,
     pub id: Option<String>,
+    pub message_type: MessageType,
 }
 
 // ── Message stanzas (shared) ─────────────────────────────
@@ -260,6 +268,39 @@ pub fn parse_presence(data: &str) -> Option<IncomingPresence> {
     })
 }
 
+// ── MUC (XEP-0045) ──────────────────────────────────────
+
+/// Builds a MUC join presence stanza (XEP-0045).
+/// `from` is Some for component mode, None for C2S.
+pub fn build_muc_join(room_jid: &str, nick: &str, from: Option<&str>) -> String {
+    let from_attr = from
+        .map(|f| format!(" from='{f}'"))
+        .unwrap_or_default();
+    // Request zero history — we persist messages ourselves.
+    // Without this the server replays the last N messages on every
+    // reconnect, creating duplicates in our memory store.
+    format!(
+        "<presence{from_attr} to='{room_jid}/{nick}'>\
+         <x xmlns='http://jabber.org/protocol/muc'>\
+         <history maxstanzas='0'/>\
+         </x>\
+         </presence>"
+    )
+}
+
+/// Builds a groupchat message for a MUC room (XEP-0045).
+/// `from` is Some for component mode, None for C2S.
+pub fn build_muc_message(from: Option<&str>, to: &str, body: &str) -> String {
+    let from_attr = from
+        .map(|f| format!(" from='{f}'"))
+        .unwrap_or_default();
+    format!(
+        "<message{from_attr} to='{to}' type='groupchat'>\
+         <body>{body}</body>\
+         </message>"
+    )
+}
+
 // ── Roster (RFC 6121) ───────────────────────────────────
 
 /// Roster query request — fetch the bot's contact list
@@ -341,11 +382,17 @@ pub fn parse_message(data: &str) -> Option<IncomingMessage> {
         return None;
     }
 
+    let message_type = match extract_attr(data, "type").as_deref() {
+        Some("groupchat") => MessageType::GroupChat,
+        _ => MessageType::Chat,
+    };
+
     Some(IncomingMessage {
         from,
         to: to.unwrap_or_default(),
         body: trimmed.to_string(),
         id,
+        message_type,
     })
 }
 
@@ -816,5 +863,93 @@ mod tests {
                    </message>";
         assert!(is_chat_state_notification(xml));
         assert!(parse_message(xml).is_none());
+    }
+
+    // ── MessageType tests ──────────────────────────────
+
+    #[test]
+    fn test_parse_message_chat_type() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <body>Hello</body></message>";
+        let msg = parse_message(xml).unwrap();
+        assert_eq!(msg.message_type, MessageType::Chat);
+    }
+
+    #[test]
+    fn test_parse_message_groupchat_type() {
+        let xml = "<message from='lobby@conference.localhost/alice' to='bot@localhost' type='groupchat'>\
+                   <body>Hey everyone</body></message>";
+        let msg = parse_message(xml).unwrap();
+        assert_eq!(msg.message_type, MessageType::GroupChat);
+        assert_eq!(msg.from, "lobby@conference.localhost/alice");
+        assert_eq!(msg.body, "Hey everyone");
+    }
+
+    #[test]
+    fn test_parse_message_no_type_defaults_to_chat() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost'>\
+                   <body>Hi</body></message>";
+        let msg = parse_message(xml).unwrap();
+        assert_eq!(msg.message_type, MessageType::Chat);
+    }
+
+    // ── MUC stanza builder tests ───────────────────────
+
+    #[test]
+    fn test_build_muc_join_c2s() {
+        let xml = build_muc_join("lobby@conference.localhost", "bot", None);
+        assert!(!xml.contains("from="));
+        assert!(xml.contains("to='lobby@conference.localhost/bot'"));
+        assert!(xml.contains("http://jabber.org/protocol/muc"));
+        assert!(xml.contains("<history maxstanzas='0'/>"));
+    }
+
+    #[test]
+    fn test_build_muc_join_component() {
+        let xml = build_muc_join("lobby@conference.localhost", "bot", Some("agent.localhost"));
+        assert!(xml.contains("from='agent.localhost'"));
+        assert!(xml.contains("to='lobby@conference.localhost/bot'"));
+        assert!(xml.contains("http://jabber.org/protocol/muc"));
+        assert!(xml.contains("<history maxstanzas='0'/>"));
+    }
+
+    #[test]
+    fn test_build_muc_message_c2s() {
+        let xml = build_muc_message(None, "lobby@conference.localhost", "Hello room!");
+        assert!(!xml.contains("from="));
+        assert!(xml.contains("to='lobby@conference.localhost'"));
+        assert!(xml.contains("type='groupchat'"));
+        assert!(xml.contains("<body>Hello room!</body>"));
+    }
+
+    #[test]
+    fn test_build_muc_message_component() {
+        let xml = build_muc_message(Some("agent.localhost"), "lobby@conference.localhost", "Hi!");
+        assert!(xml.contains("from='agent.localhost'"));
+        assert!(xml.contains("type='groupchat'"));
+        assert!(xml.contains("<body>Hi!</body>"));
+    }
+
+    #[test]
+    fn test_groupchat_composing_notification_filtered() {
+        // MUC composing notification without body → should be filtered
+        let xml = "<message from='lobby@conference.localhost/alice' to='bot@localhost' type='groupchat'>\
+                   <composing xmlns='http://jabber.org/protocol/chatstates'/>\
+                   </message>";
+        assert!(is_chat_state_notification(xml));
+        assert!(parse_message(xml).is_none());
+    }
+
+    #[test]
+    fn test_groupchat_message_with_body_and_state_passes() {
+        // MUC message with body + active state → should parse with GroupChat type
+        let xml = "<message from='lobby@conference.localhost/alice' to='bot@localhost' type='groupchat'>\
+                   <body>Hello room!</body>\
+                   <active xmlns='http://jabber.org/protocol/chatstates'/>\
+                   </message>";
+        assert!(!is_chat_state_notification(xml));
+        let msg = parse_message(xml).unwrap();
+        assert_eq!(msg.message_type, MessageType::GroupChat);
+        assert_eq!(msg.body, "Hello room!");
     }
 }

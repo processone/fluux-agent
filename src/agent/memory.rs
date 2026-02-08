@@ -189,6 +189,21 @@ impl Memory {
     /// For assistant messages, no JID is included (agent identity may change):
     ///   `### assistant`
     pub fn store_message(&self, jid: &str, role: &str, content: &str) -> Result<()> {
+        self.store_message_with_jid(jid, role, content, Some(jid))
+    }
+
+    /// Appends a message with a custom sender label in the header.
+    /// Used for MUC rooms where the sender is identified by nick, not JID.
+    ///
+    /// `sender_label` is included in user headers: `### user (sender_label)`
+    /// Pass None to omit the label (assistant messages always omit it).
+    pub fn store_message_with_jid(
+        &self,
+        jid: &str,
+        role: &str,
+        content: &str,
+        sender_label: Option<&str>,
+    ) -> Result<()> {
         let path = self.user_dir(jid)?.join("history.md");
         let mut file = OpenOptions::new()
             .create(true)
@@ -196,7 +211,11 @@ impl Memory {
             .open(&path)?;
 
         if role == "user" {
-            writeln!(file, "### user ({jid})\n{content}\n")?;
+            if let Some(label) = sender_label {
+                writeln!(file, "### user ({label})\n{content}\n")?;
+            } else {
+                writeln!(file, "### user\n{content}\n")?;
+            }
         } else {
             writeln!(file, "### {role}\n{content}\n")?;
         }
@@ -972,6 +991,77 @@ New message with JID
             memory.get_user_profile("bob@test").unwrap().unwrap(),
             "Bob's profile"
         );
+    }
+
+    // ── MUC-specific memory tests ──────────────────────
+
+    #[test]
+    fn test_store_message_with_muc_nick_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        let room_jid = "lobby@conference.localhost";
+        memory
+            .store_message_with_jid(room_jid, "user", "Hello everyone!", Some("alice@muc"))
+            .unwrap();
+        memory
+            .store_message(room_jid, "assistant", "Hi Alice!")
+            .unwrap();
+
+        // Verify raw format
+        let raw = fs::read_to_string(dir.path().join(room_jid).join("history.md")).unwrap();
+        assert!(raw.contains("### user (alice@muc)"));
+        assert!(raw.contains("### assistant"));
+
+        // Verify parsed history strips labels
+        let history = memory.get_history(room_jid, 10).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].content, "Hello everyone!");
+        assert_eq!(history[1].role, "assistant");
+        assert_eq!(history[1].content, "Hi Alice!");
+    }
+
+    #[test]
+    fn test_store_message_with_jid_none_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        memory
+            .store_message_with_jid("test@localhost", "user", "No label", None)
+            .unwrap();
+
+        let raw = fs::read_to_string(dir.path().join("test@localhost/history.md")).unwrap();
+        assert!(raw.contains("### user\n"));
+        assert!(!raw.contains("### user ("));
+    }
+
+    #[test]
+    fn test_muc_history_multiple_participants() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        let room = "dev@conference.localhost";
+        memory
+            .store_message_with_jid(room, "user", "Anyone around?", Some("alice@muc"))
+            .unwrap();
+        memory
+            .store_message_with_jid(room, "user", "I'm here", Some("bob@muc"))
+            .unwrap();
+        memory
+            .store_message_with_jid(room, "user", "@bot help us", Some("alice@muc"))
+            .unwrap();
+        memory
+            .store_message(room, "assistant", "How can I help?")
+            .unwrap();
+
+        let history = memory.get_history(room, 20).unwrap();
+        assert_eq!(history.len(), 4);
+        // All participant messages are role "user" (labels stripped)
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[1].role, "user");
+        assert_eq!(history[2].role, "user");
+        assert_eq!(history[3].role, "assistant");
     }
 
     #[test]
