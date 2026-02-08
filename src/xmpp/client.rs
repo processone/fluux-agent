@@ -3,9 +3,8 @@
 /// Connects as a regular XMPP user with SASL authentication
 /// and STARTTLS, providing the same channel interface as the
 /// component module.
-use anyhow::{anyhow, Result};
 use std::time::Duration;
-use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{split, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_native_tls::TlsConnector;
@@ -14,6 +13,7 @@ use tracing::{debug, error, info, warn};
 use super::component::{ChatState, XmppCommand, XmppEvent};
 use super::sasl;
 use super::stanzas;
+use super::XmppError;
 use crate::config::{ConnectionMode, ServerConfig};
 
 pub struct XmppClient {
@@ -36,27 +36,43 @@ impl XmppClient {
         self
     }
 
-    /// Same interface as XmppComponent::connect()
+    /// Starts the connection and returns communication channels.
+    ///
+    /// The full connection handshake (TCP → STARTTLS → SASL → bind →
+    /// roster → initial presence) is completed synchronously (awaited).
+    /// If any phase fails, a classified `XmppError` is returned.
+    /// On success, the event loop is spawned as a background task.
     pub async fn connect(
         self,
-    ) -> Result<(mpsc::Receiver<XmppEvent>, mpsc::Sender<XmppCommand>)> {
+    ) -> Result<(mpsc::Receiver<XmppEvent>, mpsc::Sender<XmppCommand>), XmppError> {
         let (event_tx, event_rx) = mpsc::channel::<XmppEvent>(100);
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(100);
 
-        tokio::spawn(async move {
-            if let Err(e) = self.run(event_tx, cmd_rx).await {
-                error!("XMPP client error: {e}");
-            }
-        });
+        // Complete the full connection handshake
+        let (reader, writer) = self.establish().await?;
+
+        // Connection established — notify runtime
+        let _ = event_tx.send(XmppEvent::Connected).await;
+
+        // Spawn the event loop as a background task
+        tokio::spawn(Self::run_event_loop(reader, writer, event_tx, cmd_rx));
 
         Ok((event_rx, cmd_tx))
     }
 
-    async fn run(
+    /// Establishes a fully authenticated XMPP C2S connection.
+    ///
+    /// Phases: TCP → STARTTLS → TLS → SASL → bind → roster → presence → subscribe.
+    /// Returns the split TLS reader/writer on success.
+    async fn establish(
         &self,
-        event_tx: mpsc::Sender<XmppEvent>,
-        cmd_rx: mpsc::Receiver<XmppCommand>,
-    ) -> Result<()> {
+    ) -> Result<
+        (
+            ReadHalf<tokio_native_tls::TlsStream<TcpStream>>,
+            WriteHalf<tokio_native_tls::TlsStream<TcpStream>>,
+        ),
+        XmppError,
+    > {
         let (jid, password, resource, tls_verify) = match &self.config.mode {
             ConnectionMode::Client {
                 jid,
@@ -69,61 +85,86 @@ impl XmppClient {
                 resource.clone(),
                 *tls_verify,
             ),
-            _ => return Err(anyhow!("XmppClient requires client mode config")),
+            _ => {
+                return Err(XmppError::Config(
+                    "XmppClient requires client mode config".into(),
+                ))
+            }
         };
 
         let domain = jid
             .split('@')
             .nth(1)
-            .ok_or_else(|| anyhow!("Invalid JID (missing @): {jid}"))?
+            .ok_or_else(|| XmppError::Config(format!("Invalid JID (missing @): {jid}")))?
             .to_string();
         let username = jid.split('@').next().unwrap().to_string();
 
         let addr = format!("{}:{}", self.config.host, self.config.port);
         info!("Connecting to XMPP server at {addr} (C2S)...");
 
-        let mut stream = TcpStream::connect(&addr).await?;
+        let mut stream = TcpStream::connect(&addr)
+            .await
+            .map_err(|e| XmppError::Transient(format!("TCP connect to {addr}: {e}")))?;
         info!("TCP connected to {addr}");
 
         // --- Phase 1: Initial stream open (plaintext) ---
         let stream_open = stanzas::build_client_stream_open(&domain);
-        stream.write_all(stream_open.as_bytes()).await?;
+        stream
+            .write_all(stream_open.as_bytes())
+            .await
+            .map_err(|e| XmppError::Transient(format!("Stream open write: {e}")))?;
         debug!("Sent client stream open");
 
-        let features = read_until(&mut stream, "</stream:features>").await?;
+        let features = read_until(&mut stream, "</stream:features>")
+            .await
+            .map_err(|e| XmppError::Transient(format!("Stream features read: {e}")))?;
         debug!("Stream features: {features}");
 
         // --- Phase 2: STARTTLS ---
         if stanzas::has_starttls(&features) {
             stream
                 .write_all(stanzas::build_starttls().as_bytes())
-                .await?;
+                .await
+                .map_err(|e| XmppError::Transient(format!("STARTTLS write: {e}")))?;
             debug!("Sent STARTTLS request");
 
-            let response = read_until(&mut stream, "/>").await?;
+            let response = read_until(&mut stream, "/>")
+                .await
+                .map_err(|e| XmppError::Transient(format!("STARTTLS response read: {e}")))?;
             if !stanzas::is_starttls_proceed(&response) {
-                return Err(anyhow!("STARTTLS failed: {response}"));
+                return Err(XmppError::Transient(format!(
+                    "STARTTLS failed: {response}"
+                )));
             }
             debug!("STARTTLS proceed received");
         } else {
-            return Err(anyhow!(
-                "Server does not advertise STARTTLS — refusing plaintext auth"
+            return Err(XmppError::Config(
+                "Server does not advertise STARTTLS — refusing plaintext auth".into(),
             ));
         }
 
         // Upgrade to TLS
         let connector = native_tls::TlsConnector::builder()
             .danger_accept_invalid_certs(!tls_verify)
-            .build()?;
+            .build()
+            .map_err(|e| XmppError::Transient(format!("TLS connector build: {e}")))?;
         let connector = TlsConnector::from(connector);
-        let mut tls_stream = connector.connect(&domain, stream).await?;
+        let mut tls_stream = connector
+            .connect(&domain, stream)
+            .await
+            .map_err(|e| XmppError::Transient(format!("TLS handshake: {e}")))?;
         info!("TLS established");
 
         // --- Phase 3: Re-open stream over TLS ---
         let stream_open = stanzas::build_client_stream_open(&domain);
-        tls_stream.write_all(stream_open.as_bytes()).await?;
+        tls_stream
+            .write_all(stream_open.as_bytes())
+            .await
+            .map_err(|e| XmppError::Transient(format!("Post-TLS stream open: {e}")))?;
 
-        let features = read_until(&mut tls_stream, "</stream:features>").await?;
+        let features = read_until(&mut tls_stream, "</stream:features>")
+            .await
+            .map_err(|e| XmppError::Transient(format!("Post-TLS features read: {e}")))?;
         debug!("Post-TLS features: {features}");
 
         // --- Phase 4: SASL authentication ---
@@ -131,39 +172,57 @@ impl XmppClient {
         info!("SASL mechanisms: {mechanisms:?}");
 
         if mechanisms.iter().any(|m| m == "SCRAM-SHA-1") {
-            sasl::authenticate_scram_sha1(&mut tls_stream, &username, &password).await?;
+            sasl::authenticate_scram_sha1(&mut tls_stream, &username, &password)
+                .await
+                .map_err(|e| XmppError::Auth(format!("SCRAM-SHA-1 auth: {e}")))?;
         } else if mechanisms.iter().any(|m| m == "PLAIN") {
-            sasl::authenticate_plain(&mut tls_stream, &username, &password).await?;
+            sasl::authenticate_plain(&mut tls_stream, &username, &password)
+                .await
+                .map_err(|e| XmppError::Auth(format!("PLAIN auth: {e}")))?;
         } else {
-            return Err(anyhow!(
-                "No supported SASL mechanism (need SCRAM-SHA-1 or PLAIN)"
+            return Err(XmppError::Config(
+                "No supported SASL mechanism (need SCRAM-SHA-1 or PLAIN)".into(),
             ));
         }
         info!("SASL authentication successful");
 
         // --- Phase 5: Re-open stream after SASL ---
         let stream_open = stanzas::build_client_stream_open(&domain);
-        tls_stream.write_all(stream_open.as_bytes()).await?;
+        tls_stream
+            .write_all(stream_open.as_bytes())
+            .await
+            .map_err(|e| XmppError::Transient(format!("Post-SASL stream open: {e}")))?;
 
-        let _features = read_until(&mut tls_stream, "</stream:features>").await?;
+        let _features = read_until(&mut tls_stream, "</stream:features>")
+            .await
+            .map_err(|e| XmppError::Transient(format!("Post-SASL features read: {e}")))?;
 
         // --- Phase 6: Resource binding ---
         let bind_req = stanzas::build_bind_request(&resource);
-        tls_stream.write_all(bind_req.as_bytes()).await?;
+        tls_stream
+            .write_all(bind_req.as_bytes())
+            .await
+            .map_err(|e| XmppError::Transient(format!("Bind request write: {e}")))?;
         debug!("Sent bind request");
 
-        let bind_response = read_until(&mut tls_stream, "</iq>").await?;
-        let full_jid = stanzas::extract_bound_jid(&bind_response)
-            .ok_or_else(|| anyhow!("Failed to bind resource: {bind_response}"))?;
+        let bind_response = read_until(&mut tls_stream, "</iq>")
+            .await
+            .map_err(|e| XmppError::Transient(format!("Bind response read: {e}")))?;
+        let full_jid = stanzas::extract_bound_jid(&bind_response).ok_or_else(|| {
+            XmppError::Transient(format!("Failed to bind resource: {bind_response}"))
+        })?;
         info!("Bound as: {full_jid}");
 
         // --- Phase 7: Fetch roster ---
         tls_stream
             .write_all(stanzas::build_roster_get().as_bytes())
-            .await?;
+            .await
+            .map_err(|e| XmppError::Transient(format!("Roster request write: {e}")))?;
         debug!("Sent roster request");
 
-        let roster_response = read_until(&mut tls_stream, "</iq>").await?;
+        let roster_response = read_until(&mut tls_stream, "</iq>")
+            .await
+            .map_err(|e| XmppError::Transient(format!("Roster response read: {e}")))?;
         let roster_jids = stanzas::extract_roster_jids(&roster_response);
         info!("Roster contains {} contact(s)", roster_jids.len());
         for jid in &roster_jids {
@@ -173,7 +232,8 @@ impl XmppClient {
         // --- Phase 8: Send initial presence ---
         tls_stream
             .write_all(stanzas::build_initial_presence().as_bytes())
-            .await?;
+            .await
+            .map_err(|e| XmppError::Transient(format!("Initial presence write: {e}")))?;
         info!("Sent initial presence");
 
         // --- Phase 9: Subscribe to allowed JIDs not already in roster ---
@@ -187,7 +247,10 @@ impl XmppClient {
                 continue;
             }
             let subscribe = stanzas::build_subscribe(jid);
-            tls_stream.write_all(subscribe.as_bytes()).await?;
+            tls_stream
+                .write_all(subscribe.as_bytes())
+                .await
+                .map_err(|e| XmppError::Transient(format!("Subscribe write: {e}")))?;
             debug!("Sent presence subscribe to {jid}");
             subscribed_count += 1;
         }
@@ -197,23 +260,18 @@ impl XmppClient {
             info!("All allowed JIDs already in roster — no new subscriptions needed");
         }
 
-        let _ = event_tx.send(XmppEvent::Connected).await;
-
-        // --- Phase 10: Main read/write loop ---
-        let allowed_jids = self.allowed_jids.clone();
         let (reader, writer) = split(tls_stream);
-        Self::run_event_loop(reader, writer, event_tx, cmd_rx, allowed_jids).await
+        Ok((reader, writer))
     }
 
-    /// Main read/write loop — same pattern as component.rs
+    /// Main read/write loop — spawned as a background task after
+    /// successful connection establishment.
     async fn run_event_loop<R, W>(
         reader: R,
         writer: W,
         event_tx: mpsc::Sender<XmppEvent>,
         mut cmd_rx: mpsc::Receiver<XmppCommand>,
-        allowed_jids: Vec<String>,
-    ) -> Result<()>
-    where
+    ) where
         R: AsyncReadExt + Unpin + Send + 'static,
         W: AsyncWriteExt + Unpin + Send + 'static,
     {
@@ -237,6 +295,20 @@ impl XmppClient {
                         let chunk = String::from_utf8_lossy(&buf[..n]);
                         xml_buffer.push_str(&chunk);
 
+                        // Detect stream errors (e.g. conflict, system-shutdown)
+                        if let Some((stanza, stanza_end)) =
+                            stanzas::extract_stream_error_stanza(&xml_buffer)
+                        {
+                            if let Some(condition) = stanzas::parse_stream_error(&stanza) {
+                                error!("Stream error received: {condition}");
+                                let _ = event_tx_clone
+                                    .send(XmppEvent::StreamError(condition))
+                                    .await;
+                            }
+                            xml_buffer = xml_buffer[stanza_end..].to_string();
+                            break; // stream errors are fatal
+                        }
+
                         // Process all complete <message>...</message> stanzas
                         while let Some(end) = xml_buffer.find("</message>") {
                             let stanza_end = end + "</message>".len();
@@ -246,19 +318,27 @@ impl XmppClient {
                                 debug!("Received message from {}: {}", msg.from, msg.body);
                                 let _ = event_tx_clone.send(XmppEvent::Message(msg)).await;
                             } else {
-                                debug!("Skipping non-message stanza (chat state or no body)");
+                                debug!(
+                                    "Skipping non-message stanza (chat state or no body)"
+                                );
                             }
 
                             xml_buffer = xml_buffer[stanza_end..].to_string();
                         }
 
                         // Process all complete <presence ... /> or <presence>...</presence> stanzas
-                        while let Some(presence) = stanzas::extract_presence_stanza(&xml_buffer) {
+                        while let Some(presence) =
+                            stanzas::extract_presence_stanza(&xml_buffer)
+                        {
                             let (stanza, stanza_end) = presence;
 
                             if let Some(pres) = stanzas::parse_presence(&stanza) {
-                                debug!("Received presence from {}: {:?}", pres.from, pres.presence_type);
-                                let _ = event_tx_clone.send(XmppEvent::Presence(pres)).await;
+                                debug!(
+                                    "Received presence from {}: {:?}",
+                                    pres.from, pres.presence_type
+                                );
+                                let _ =
+                                    event_tx_clone.send(XmppEvent::Presence(pres)).await;
                             }
 
                             xml_buffer = xml_buffer[stanza_end..].to_string();
@@ -276,7 +356,6 @@ impl XmppClient {
         });
 
         // Write task — C2S: no 'from' attribute (server adds it)
-        let _allowed_jids = allowed_jids;
         let write_handle = tokio::spawn(async move {
             let mut writer = writer;
             while let Some(cmd) = cmd_rx.recv().await {
@@ -317,8 +396,6 @@ impl XmppClient {
             _ = read_handle => {},
             _ = write_handle => {},
         }
-
-        Ok(())
     }
 }
 
@@ -328,7 +405,7 @@ impl XmppClient {
 async fn read_until<S: AsyncReadExt + Unpin>(
     stream: &mut S,
     marker: &str,
-) -> Result<String> {
+) -> anyhow::Result<String> {
     let mut buf = vec![0u8; 8192];
     let mut accumulated = String::new();
     let timeout = Duration::from_secs(10);
@@ -336,11 +413,15 @@ async fn read_until<S: AsyncReadExt + Unpin>(
     loop {
         let read_future = stream.read(&mut buf);
         let n = match tokio::time::timeout(timeout, read_future).await {
-            Ok(Ok(0)) => return Err(anyhow!("Connection closed while waiting for {marker}")),
+            Ok(Ok(0)) => {
+                return Err(anyhow::anyhow!(
+                    "Connection closed while waiting for {marker}"
+                ))
+            }
             Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(anyhow!("Read error: {e}")),
+            Ok(Err(e)) => return Err(anyhow::anyhow!("Read error: {e}")),
             Err(_) => {
-                return Err(anyhow!(
+                return Err(anyhow::anyhow!(
                     "Timeout waiting for {marker} (accumulated: {accumulated})"
                 ))
             }

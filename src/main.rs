@@ -1,18 +1,30 @@
 mod agent;
+mod backoff;
 mod config;
 mod llm;
 mod sandbox;
 mod skills;
 mod xmpp;
 
-use anyhow::Result;
-use tracing::info;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::agent::memory::Memory;
 use crate::agent::runtime::AgentRuntime;
+use crate::backoff::Backoff;
 use crate::config::Config;
 use crate::llm::AnthropicClient;
+use crate::xmpp::component::DisconnectReason;
+
+/// How long a connection must be up before we consider it "stable"
+/// and reset the backoff to initial values.
+const STABILITY_THRESHOLD: Duration = Duration::from_secs(60);
+
+/// Maximum consecutive transient failures before giving up.
+const MAX_RECONNECT_ATTEMPTS: u32 = 20;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -69,21 +81,110 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Initialize memory
+    // Initialize components that persist across reconnections
     let memory = Memory::open(&config.memory.path)?;
-
-    // Initialize LLM client
     let llm = AnthropicClient::new(config.llm.clone());
+    let runtime = AgentRuntime::new(config.clone(), llm, memory);
 
-    // Connect to XMPP server (component or C2S, based on config)
-    let (event_rx, cmd_tx) = xmpp::connect(
-        config.server.clone(),
-        config.agent.allowed_jids.clone(),
-    ).await?;
+    let mut backoff = Backoff::new(
+        Duration::from_secs(2),
+        Duration::from_secs(60),
+        2,
+    );
 
-    // Launch agentic runtime
-    let runtime = AgentRuntime::new(config, llm, memory);
-    runtime.run(event_rx, cmd_tx).await?;
+    // ── Reconnection loop ──────────────────────────────────────────
+    loop {
+        info!(
+            "Connecting to XMPP server (attempt {})...",
+            backoff.attempt + 1
+        );
 
-    Ok(())
+        match xmpp::connect(
+            config.server.clone(),
+            config.agent.allowed_jids.clone(),
+        )
+        .await
+        {
+            Ok((event_rx, cmd_tx)) => {
+                let connected_at = Instant::now();
+
+                // Run the agent runtime until the connection drops
+                let disconnect_reason = tokio::select! {
+                    result = runtime.run(event_rx, cmd_tx) => {
+                        match result {
+                            Ok(reason) => reason,
+                            Err(e) => {
+                                error!("Runtime error: {e}");
+                                DisconnectReason::ConnectionLost
+                            }
+                        }
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Shutdown signal received, exiting");
+                        return Ok(());
+                    }
+                };
+
+                // Session replaced by another client — do NOT reconnect
+                // (would cause a ping-pong between the two clients)
+                if matches!(disconnect_reason, DisconnectReason::Conflict) {
+                    error!("Session replaced by another client (conflict), exiting");
+                    return Err(anyhow!("Session replaced by another client (conflict)"));
+                }
+
+                // Non-retriable stream errors
+                if let DisconnectReason::StreamError(ref condition) = disconnect_reason {
+                    warn!("Stream error: {condition}");
+                }
+
+                // Reset backoff if the connection was stable (up long enough)
+                if connected_at.elapsed() >= STABILITY_THRESHOLD {
+                    backoff.reset();
+                    info!("Connection was stable, backoff reset");
+                } else {
+                    warn!(
+                        "Connection lasted only {}s",
+                        connected_at.elapsed().as_secs()
+                    );
+                }
+
+                warn!("XMPP connection lost, preparing to reconnect...");
+            }
+            Err(e) => {
+                // Permanent errors — exit immediately
+                if !e.is_retriable() {
+                    error!("Permanent connection error: {e}");
+                    return Err(anyhow!("Cannot connect: {e}"));
+                }
+
+                warn!("Connection failed: {e}");
+
+                if backoff.exceeded_max_attempts(MAX_RECONNECT_ATTEMPTS) {
+                    error!(
+                        "Exceeded {} reconnection attempts, giving up",
+                        MAX_RECONNECT_ATTEMPTS
+                    );
+                    return Err(anyhow!(
+                        "Max reconnection attempts ({MAX_RECONNECT_ATTEMPTS}) exceeded"
+                    ));
+                }
+            }
+        }
+
+        // Wait before retrying, but allow graceful shutdown during the wait
+        let delay = backoff.next_delay();
+        info!(
+            "Reconnecting in {}s (attempt {})...",
+            delay.as_secs(),
+            backoff.attempt + 1
+        );
+
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = tokio::signal::ctrl_c() => {
+                info!("Shutdown signal received during backoff, exiting");
+                return Ok(());
+            }
+        }
+    }
 }

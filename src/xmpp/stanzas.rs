@@ -458,6 +458,71 @@ pub fn extract_presence_stanza(buffer: &str) -> Option<(String, usize)> {
     None // incomplete stanza
 }
 
+// ── Stream error parsing ──────────────────────────────────
+
+/// Extracts a complete `<stream:error>` stanza from the XML buffer.
+/// Returns `(stanza_text, end_position)` or `None` if not found/incomplete.
+pub fn extract_stream_error_stanza(buffer: &str) -> Option<(String, usize)> {
+    let start = buffer.find("<stream:error")?;
+    let after_tag = &buffer[start..];
+    if let Some(close_pos) = after_tag.find("</stream:error>") {
+        let stanza_end = start + close_pos + "</stream:error>".len();
+        return Some((buffer[start..stanza_end].to_string(), stanza_end));
+    }
+    None // incomplete
+}
+
+/// Parses a `<stream:error>` stanza and extracts the error condition.
+///
+/// XMPP stream errors contain a child element from the
+/// `urn:ietf:params:xml:ns:xmpp-streams` namespace that identifies
+/// the condition (e.g. `<conflict/>`, `<host-unknown/>`).
+///
+/// Returns the condition name (e.g. `"conflict"`, `"host-unknown"`).
+pub fn parse_stream_error(xml: &str) -> Option<String> {
+    if !xml.contains("<stream:error") {
+        return None;
+    }
+
+    // Known XMPP stream error conditions (RFC 6120 §4.9.3)
+    let conditions = [
+        "bad-format",
+        "bad-namespace-prefix",
+        "conflict",
+        "connection-timeout",
+        "host-gone",
+        "host-unknown",
+        "improper-addressing",
+        "internal-server-error",
+        "invalid-from",
+        "invalid-namespace",
+        "invalid-xml",
+        "not-authorized",
+        "not-well-formed",
+        "policy-violation",
+        "remote-connection-failed",
+        "reset",
+        "resource-constraint",
+        "restricted-xml",
+        "see-other-host",
+        "system-shutdown",
+        "undefined-condition",
+        "unsupported-encoding",
+        "unsupported-feature",
+        "unsupported-stanza-type",
+        "unsupported-version",
+    ];
+
+    for condition in &conditions {
+        if xml.contains(&format!("<{condition}")) {
+            return Some(condition.to_string());
+        }
+    }
+
+    // Unknown condition — return generic
+    Some("unknown".to_string())
+}
+
 /// Extracts text between <tag> and </tag>
 pub fn extract_element_text(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
@@ -1113,5 +1178,62 @@ mod tests {
         let (stanza, end) = extract_presence_stanza(buf).unwrap();
         assert_eq!(stanza, buf);
         assert_eq!(end, buf.len());
+    }
+
+    // ── Stream error tests ──────────────────────────────
+
+    #[test]
+    fn test_parse_stream_error_conflict() {
+        let xml = "<stream:error><conflict xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>";
+        assert_eq!(parse_stream_error(xml), Some("conflict".to_string()));
+    }
+
+    #[test]
+    fn test_parse_stream_error_host_unknown() {
+        let xml = "<stream:error><host-unknown xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>";
+        assert_eq!(parse_stream_error(xml), Some("host-unknown".to_string()));
+    }
+
+    #[test]
+    fn test_parse_stream_error_system_shutdown() {
+        let xml = "<stream:error><system-shutdown xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>";
+        assert_eq!(parse_stream_error(xml), Some("system-shutdown".to_string()));
+    }
+
+    #[test]
+    fn test_parse_stream_error_with_text() {
+        let xml = "<stream:error>\
+                   <conflict xmlns='urn:ietf:params:xml:ns:xmpp-streams'/>\
+                   <text xmlns='urn:ietf:params:xml:ns:xmpp-streams'>Replaced by new connection</text>\
+                   </stream:error>";
+        assert_eq!(parse_stream_error(xml), Some("conflict".to_string()));
+    }
+
+    #[test]
+    fn test_parse_stream_error_not_a_stream_error() {
+        let xml = "<message from='user@localhost'><body>Hi</body></message>";
+        assert_eq!(parse_stream_error(xml), None);
+    }
+
+    #[test]
+    fn test_extract_stream_error_stanza() {
+        let buf = "some data<stream:error><conflict xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>more";
+        let (stanza, end) = extract_stream_error_stanza(buf).unwrap();
+        assert!(stanza.contains("<conflict"));
+        assert!(stanza.starts_with("<stream:error>"));
+        assert!(stanza.ends_with("</stream:error>"));
+        assert!(end < buf.len());
+    }
+
+    #[test]
+    fn test_extract_stream_error_stanza_incomplete() {
+        let buf = "<stream:error><conflict";
+        assert!(extract_stream_error_stanza(buf).is_none());
+    }
+
+    #[test]
+    fn test_extract_stream_error_stanza_not_present() {
+        let buf = "<message><body>hi</body></message>";
+        assert!(extract_stream_error_stanza(buf).is_none());
     }
 }

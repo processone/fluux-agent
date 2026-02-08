@@ -26,7 +26,7 @@ The minimum viable agent: connect, authenticate, converse, remember.
 - [x] Typing indicators (outbound `<composing/>` / `<paused/>` / `<active/>`, XEP-0085)
 - [x] MUC room joining (XEP-0045) — join configured rooms, respond to mentions, full room context
 - [x] Cross-domain message rejection (security default)
-- [ ] Reconnection with exponential backoff
+- [x] Reconnection with exponential backoff
 
 ### Conversation sessions ✓
 
@@ -754,6 +754,7 @@ The agent initiates, not just responds.
 - [ ] Webhook ingestion — external events trigger agent actions
 - [ ] PubSub subscription — agent reacts to XMPP PubSub events
 - [ ] MCP bridge — leverage existing MCP servers as skills
+- [ ] XMPP Stream Management (XEP-0198) — message acknowledgment, session resumption, reliability for unstable networks
 
 ### Presence-based proactivity
 

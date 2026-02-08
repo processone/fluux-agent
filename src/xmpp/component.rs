@@ -1,11 +1,12 @@
-use anyhow::{anyhow, Result};
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::stanzas::{self, IncomingMessage, IncomingPresence};
+use super::XmppError;
 use crate::config::{ConnectionMode, ServerConfig};
 
 /// Events emitted by the XMPP layer to the runtime
@@ -14,6 +15,8 @@ pub enum XmppEvent {
     Connected,
     Message(IncomingMessage),
     Presence(IncomingPresence),
+    /// A `<stream:error>` was received (e.g. `conflict`, `system-shutdown`).
+    StreamError(String),
     Error(String),
 }
 
@@ -44,6 +47,19 @@ pub enum ChatState {
     Paused,
 }
 
+/// Reason the XMPP connection was lost.
+/// Returned by `AgentRuntime::run()` so the reconnection loop
+/// can decide whether to retry.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DisconnectReason {
+    /// Normal disconnection (server closed stream, network error).
+    ConnectionLost,
+    /// Session replaced by another client with the same resource.
+    Conflict,
+    /// Server sent a stream error other than conflict.
+    StreamError(String),
+}
+
 /// XMPP Component (XEP-0114)
 ///
 /// Connects to an XMPP server as an external component,
@@ -58,82 +74,130 @@ impl XmppComponent {
         Self { config }
     }
 
-    /// Starts the connection and returns communication channels
+    /// Starts the connection and returns communication channels.
+    ///
+    /// The connection handshake is completed synchronously (awaited).
+    /// If the handshake fails, an `XmppError` is returned immediately.
+    /// On success, the event loop is spawned as a background task.
     ///
     /// - `event_rx`: receives XMPP events (incoming messages, etc.)
     /// - `cmd_tx`: sends commands (outgoing messages, etc.)
     pub async fn connect(
         self,
-    ) -> Result<(mpsc::Receiver<XmppEvent>, mpsc::Sender<XmppCommand>)> {
+    ) -> Result<(mpsc::Receiver<XmppEvent>, mpsc::Sender<XmppCommand>), XmppError> {
         let (event_tx, event_rx) = mpsc::channel::<XmppEvent>(100);
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(100);
 
-        tokio::spawn(async move {
-            if let Err(e) = self.run(event_tx, cmd_rx).await {
-                error!("XMPP component error: {e}");
-            }
-        });
+        // Phase 1+2: Establish connection and complete handshake
+        let (reader, writer, domain) = self.establish().await?;
+
+        // Connection established — notify runtime
+        let _ = event_tx.send(XmppEvent::Connected).await;
+
+        // Phase 3: Spawn the event loop as a background task
+        tokio::spawn(Self::run_event_loop(
+            reader, writer, domain, event_tx, cmd_rx,
+        ));
 
         Ok((event_rx, cmd_tx))
     }
 
-    async fn run(
+    /// Establishes TCP connection and completes the XEP-0114 handshake.
+    /// Returns the split stream and the component domain on success.
+    async fn establish(
         &self,
-        event_tx: mpsc::Sender<XmppEvent>,
-        mut cmd_rx: mpsc::Receiver<XmppCommand>,
-    ) -> Result<()> {
+    ) -> Result<(OwnedReadHalf, OwnedWriteHalf, String), XmppError> {
         let (domain, secret) = match &self.config.mode {
             ConnectionMode::Component {
                 component_domain,
                 component_secret,
             } => (component_domain.clone(), component_secret.clone()),
-            _ => return Err(anyhow!("XmppComponent requires component mode config")),
+            _ => {
+                return Err(XmppError::Config(
+                    "XmppComponent requires component mode config".into(),
+                ))
+            }
         };
 
         let addr = format!("{}:{}", self.config.host, self.config.port);
         info!("Connecting to XMPP server at {addr}...");
 
-        let mut stream = TcpStream::connect(&addr).await?;
+        let mut stream = TcpStream::connect(&addr)
+            .await
+            .map_err(|e| XmppError::Transient(format!("TCP connect to {addr}: {e}")))?;
         info!("TCP connected to {addr}");
 
         // --- Phase 1: Stream opening ---
         let stream_open = stanzas::build_stream_open(&domain);
-        stream.write_all(stream_open.as_bytes()).await?;
+        stream
+            .write_all(stream_open.as_bytes())
+            .await
+            .map_err(|e| XmppError::Transient(format!("Stream open write: {e}")))?;
         debug!("Sent stream open");
 
         // Read server response to get stream ID
         let mut buf = vec![0u8; 4096];
-        let n = stream.read(&mut buf).await?;
+        let n = stream
+            .read(&mut buf)
+            .await
+            .map_err(|e| XmppError::Transient(format!("Stream open read: {e}")))?;
+        if n == 0 {
+            return Err(XmppError::Transient(
+                "Connection closed during stream open".into(),
+            ));
+        }
         let response = String::from_utf8_lossy(&buf[..n]).to_string();
         debug!("Server response: {response}");
 
-        let stream_id = stanzas::extract_stream_id(&response)
-            .ok_or_else(|| anyhow!("No stream ID in server response"))?;
+        let stream_id = stanzas::extract_stream_id(&response).ok_or_else(|| {
+            XmppError::Transient(format!("No stream ID in server response: {response}"))
+        })?;
         info!("Got stream ID: {stream_id}");
 
         // --- Phase 2: Handshake (SHA-1 of stream_id + secret) ---
         let hash_input = format!("{stream_id}{secret}");
         let hash = hex::encode(Sha1::digest(hash_input.as_bytes()));
         let handshake = stanzas::build_handshake(&hash);
-        stream.write_all(handshake.as_bytes()).await?;
+        stream
+            .write_all(handshake.as_bytes())
+            .await
+            .map_err(|e| XmppError::Transient(format!("Handshake write: {e}")))?;
         debug!("Sent handshake");
 
-        let n = stream.read(&mut buf).await?;
+        let n = stream
+            .read(&mut buf)
+            .await
+            .map_err(|e| XmppError::Transient(format!("Handshake read: {e}")))?;
+        if n == 0 {
+            return Err(XmppError::Transient(
+                "Connection closed during handshake".into(),
+            ));
+        }
         let response = String::from_utf8_lossy(&buf[..n]).to_string();
 
         if !stanzas::is_handshake_success(&response) {
-            return Err(anyhow!("Handshake failed: {response}"));
+            return Err(XmppError::Auth(format!("Handshake failed: {response}")));
         }
 
         info!("Connected as component: {domain}");
-        let _ = event_tx.send(XmppEvent::Connected).await;
 
-        // --- Phase 3: Main loop — concurrent read/write ---
-        let (mut reader, mut writer) = stream.into_split();
+        let (reader, writer) = stream.into_split();
+        Ok((reader, writer, domain))
+    }
 
+    /// Main read/write event loop — spawned as a background task after
+    /// successful connection establishment.
+    async fn run_event_loop(
+        reader: OwnedReadHalf,
+        writer: OwnedWriteHalf,
+        domain: String,
+        event_tx: mpsc::Sender<XmppEvent>,
+        mut cmd_rx: mpsc::Receiver<XmppCommand>,
+    ) {
         // Read task
         let event_tx_clone = event_tx.clone();
         let read_handle = tokio::spawn(async move {
+            let mut reader = reader;
             let mut buf = vec![0u8; 65536];
             let mut xml_buffer = String::new();
 
@@ -149,6 +213,20 @@ impl XmppComponent {
                     Ok(n) => {
                         let chunk = String::from_utf8_lossy(&buf[..n]);
                         xml_buffer.push_str(&chunk);
+
+                        // Detect stream errors (e.g. conflict, system-shutdown)
+                        if let Some((stanza, stanza_end)) =
+                            stanzas::extract_stream_error_stanza(&xml_buffer)
+                        {
+                            if let Some(condition) = stanzas::parse_stream_error(&stanza) {
+                                error!("Stream error received: {condition}");
+                                let _ = event_tx_clone
+                                    .send(XmppEvent::StreamError(condition))
+                                    .await;
+                            }
+                            xml_buffer = xml_buffer[stanza_end..].to_string();
+                            break; // stream errors are fatal
+                        }
 
                         // Process all complete <message>...</message> stanzas
                         while let Some(end) = xml_buffer.find("</message>") {
@@ -166,12 +244,18 @@ impl XmppComponent {
                         }
 
                         // Process all complete presence stanzas
-                        while let Some(presence) = stanzas::extract_presence_stanza(&xml_buffer) {
+                        while let Some(presence) =
+                            stanzas::extract_presence_stanza(&xml_buffer)
+                        {
                             let (stanza, stanza_end) = presence;
 
                             if let Some(pres) = stanzas::parse_presence(&stanza) {
-                                debug!("Received presence from {}: {:?}", pres.from, pres.presence_type);
-                                let _ = event_tx_clone.send(XmppEvent::Presence(pres)).await;
+                                debug!(
+                                    "Received presence from {}: {:?}",
+                                    pres.from, pres.presence_type
+                                );
+                                let _ =
+                                    event_tx_clone.send(XmppEvent::Presence(pres)).await;
                             }
 
                             xml_buffer = xml_buffer[stanza_end..].to_string();
@@ -190,6 +274,7 @@ impl XmppComponent {
 
         // Write task — component mode includes 'from' attribute
         let write_handle = tokio::spawn(async move {
+            let mut writer = writer;
             while let Some(cmd) = cmd_rx.recv().await {
                 let xml = match cmd {
                     XmppCommand::SendMessage { to, body } => {
@@ -228,8 +313,6 @@ impl XmppComponent {
             _ = read_handle => {},
             _ = write_handle => {},
         }
-
-        Ok(())
     }
 }
 

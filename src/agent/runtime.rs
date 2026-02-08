@@ -4,7 +4,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::llm::{AnthropicClient, Message};
-use crate::xmpp::component::{ChatState, XmppCommand, XmppEvent};
+use crate::xmpp::component::{ChatState, DisconnectReason, XmppCommand, XmppEvent};
 use crate::xmpp::stanzas::{self, MessageType, PresenceType};
 
 use super::memory::{Memory, WorkspaceContext};
@@ -33,12 +33,15 @@ impl AgentRuntime {
         }
     }
 
-    /// Main agent loop
+    /// Main agent loop.
+    ///
+    /// Returns `DisconnectReason` indicating why the connection ended,
+    /// so the reconnection loop can decide whether to retry.
     pub async fn run(
         &self,
         mut event_rx: mpsc::Receiver<XmppEvent>,
         cmd_tx: mpsc::Sender<XmppCommand>,
-    ) -> Result<()> {
+    ) -> Result<DisconnectReason> {
         info!("Agent runtime started — waiting for messages...");
 
         while let Some(event) = event_rx.recv().await {
@@ -254,13 +257,20 @@ impl AgentRuntime {
                         }
                     }
                 }
+                XmppEvent::StreamError(condition) => {
+                    error!("XMPP stream error: {condition}");
+                    if condition == "conflict" {
+                        return Ok(DisconnectReason::Conflict);
+                    }
+                    return Ok(DisconnectReason::StreamError(condition));
+                }
                 XmppEvent::Error(e) => {
                     error!("XMPP error: {e}");
                 }
             }
         }
 
-        Ok(())
+        Ok(DisconnectReason::ConnectionLost)
     }
 
     // ── Slash commands ────────────────────────────────────
