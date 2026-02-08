@@ -85,25 +85,25 @@ Messages starting with `/` are intercepted by the runtime before they reach the 
 
 #### Implemented commands
 
-| Command | Description | Status |
-|---------|-------------|--------|
-| `/new` / `/reset` | Start a new conversation session (archive current) | ✓ |
-| `/forget` | Erase the current user's history and context | ✓ |
-| `/status` | Agent uptime, mode, LLM info, session stats | ✓ |
-| `/help` | List available commands | ✓ |
-| `/ping` | Simple liveness check (responds immediately, no LLM) | ✓ |
+| Command           | Description                                          | Status |
+|-------------------|------------------------------------------------------|--------|
+| `/new` / `/reset` | Start a new conversation session (archive current)   | ✓      |
+| `/forget`         | Erase the current user's history and context         | ✓      |
+| `/status`         | Agent uptime, mode, LLM info, session stats          | ✓      |
+| `/help`           | List available commands                              | ✓      |
+| `/ping`           | Simple liveness check (responds immediately, no LLM) | ✓      |
 
 #### Planned developer commands
 
 For debugging and development. Can be restricted to a specific admin JID or disabled entirely in production via config.
 
-| Command | Description |
-|---------|-------------|
-| `/debug` | Toggle debug output (echo raw stanzas, LLM request/response, token counts) |
-| `/context` | Show the current user's `context.md` content |
-| `/history` | Show the last N messages from the current session |
-| `/tier` | Show which model tier/model is being used for this conversation |
-| `/raw <xml>` | Send a raw XML stanza (dev only — for testing XMPP interactions) |
+| Command      | Description                                                                |
+|--------------|----------------------------------------------------------------------------|
+| `/debug`     | Toggle debug output (echo raw stanzas, LLM request/response, token counts) |
+| `/context`   | Show the current user's `context.md` content                               |
+| `/history`   | Show the last N messages from the current session                          |
+| `/tier`      | Show which model tier/model is being used for this conversation            |
+| `/raw <xml>` | Send a raw XML stanza (dev only — for testing XMPP interactions)           |
 
 #### Implementation
 
@@ -135,6 +135,7 @@ The agent can do things beyond conversation.
 - [ ] `LlmClient` trait + Ollama provider (local models via Ollama API)
 - [ ] Declarative skill capabilities (TOML manifests)
 - [ ] Action plan validation (separate from LLM)
+- [ ] Prompt injection detection — scan incoming messages for adversarial patterns before they reach the LLM
 - [ ] Builtin skill: web search
 - [ ] Builtin skill: URL fetch and summarize
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
@@ -172,7 +173,7 @@ The architecture has three layers:
 └──────────────────┬───────────────────────────────┘
                    │
 ┌──────────────────▼───────────────────────────────┐
-│              Agent Runtime (runtime.rs)           │
+│              Agent Runtime (runtime.rs)          │
 │  1. Builds tool definitions from SkillRegistry   │
 │  2. Sends to LLM as `tools` parameter            │
 │  3. If LLM returns tool_use → validate → execute │
@@ -181,7 +182,7 @@ The architecture has three layers:
 └──────────────────┬───────────────────────────────┘
                    │
 ┌──────────────────▼───────────────────────────────┐
-│              Skill Registry                       │
+│              Skill Registry                      │
 │  - Discovers available skills (builtin + Wasm)   │
 │  - Each skill provides: name, description,       │
 │    parameter schema, capability requirements     │
@@ -224,7 +225,7 @@ Build tools[] from SkillRegistry
     ↓
 Call LLM(system, messages, tools)
     ↓
-┌─── LLM response ───┐
+┌─── LLM response ────┐
 │                     │
 │  text block?  ──────┼──→ Send to user (done)
 │                     │
@@ -310,14 +311,14 @@ Each tier maps to a model identifier. The same model can appear in multiple tier
 
 Routing is **declarative, not heuristic**. The runtime doesn't try to guess task complexity. Instead, each entry point declares which tier it needs:
 
-| Source | Tier | Rationale |
-|--------|------|-----------|
-| Interactive user message (default) | `standard` | General conversation needs good reasoning |
-| Skill with `tier = "light"` in manifest | `light` | Skill author knows the task is simple |
-| Skill with `tier = "vision"` in manifest | `vision` | Skill requires image understanding |
-| Proactive cron job (v0.3) | `light` | Scheduled tasks are typically routine |
-| Context summarization | `light` | Summarizing a session into `context.md` is mechanical |
-| Complex planning (agent detects multi-step) | `heavy` | Explicit escalation for hard problems |
+| Source                                      | Tier       | Rationale                                             |
+|---------------------------------------------|------------|-------------------------------------------------------|
+| Interactive user message (default)          | `standard` | General conversation needs good reasoning             |
+| Skill with `tier = "light"` in manifest     | `light`    | Skill author knows the task is simple                 |
+| Skill with `tier = "vision"` in manifest    | `vision`   | Skill requires image understanding                    |
+| Proactive cron job (v0.3)                   | `light`    | Scheduled tasks are typically routine                 |
+| Context summarization                       | `light`    | Summarizing a session into `context.md` is mechanical |
+| Complex planning (agent detects multi-step) | `heavy`    | Explicit escalation for hard problems                 |
 
 Skills declare their tier in their TOML manifest:
 
@@ -518,6 +519,50 @@ Agent-to-agent communication.
 - [ ] Delegated task execution (agent A asks agent B to run a skill)
 - [ ] End-to-end encryption (OMEMO or custom per-agent keys)
 - [ ] Complete documentation and deployment guides
+
+---
+
+## Shared memory and RAG search
+
+As the agent accumulates per-JID memory (`memory.md`, `sessions/*.md`) and workspace-level knowledge, simple file reads won't scale. A **Retrieval-Augmented Generation (RAG)** layer will let the agent semantically search through its memory and shared knowledge base to find relevant context before answering.
+
+### Shared memory
+
+Today, memory is strictly per-JID — each user's context is isolated. For teams and organizations, some knowledge should be **shared across users**:
+
+- **Shared knowledge base** — A `data/memory/shared/` directory containing markdown files that any user's conversation can draw from. Admins curate shared context: project documentation, team decisions, onboarding material, FAQ, product specs.
+- **User-contributed shared memory** — With appropriate permissions, the agent can promote facts from per-JID memory into the shared pool (e.g., a user says "our API endpoint changed to api.v2.example.com" — the agent stores this in shared memory so all users benefit).
+- **Scoped sharing** — Shared memory can be scoped by room, team, or organization. A room's `memory.md` is already shared among room participants; this extends the concept to cross-conversation shared knowledge.
+
+### RAG search over memory
+
+Inspired by [OpenClaw's memory search architecture](https://github.com/AshishKumar4/openclaw), the agent will index its memory files and use hybrid retrieval (semantic + keyword) to find relevant context:
+
+- **Chunking and embedding** — Memory files (`memory.md`, `sessions/*.md`, shared knowledge) are chunked and embedded using a configurable embedding provider (local GGUF model for privacy, or remote API like OpenAI/Voyage for quality).
+- **Hybrid search** — Combine vector similarity (semantic paraphrase matching) with BM25 keyword search (exact tokens, code symbols, IDs). Configurable weights (e.g., 70% vector, 30% keyword).
+- **Vector store** — SQLite with vector extensions (sqlite-vec) for lightweight, self-contained storage. Per-JID indexes for private memory, plus a shared index for the knowledge base.
+- **Agent-facing tool** — A `memory_search` skill the LLM can call to retrieve relevant context before answering. The agent uses this as a "mandatory recall step" for questions about prior conversations, decisions, people, or project context.
+- **Automatic indexing** — File watchers detect changes to memory files and re-index automatically. Embedding cache avoids redundant API calls.
+- **Privacy boundaries** — RAG search respects JID isolation. A user's `memory_search` only hits their own memory + shared memory. Per-JID memory is never leaked across users.
+
+### Configuration
+
+```toml
+[memory.search]
+enabled = true
+provider = "local"                    # "local" (GGUF), "openai", "voyage"
+model = "nomic-embed-text-v1.5"      # Embedding model
+sources = ["memory", "sessions", "shared"]  # What to index
+
+[memory.search.hybrid]
+vector_weight = 0.7
+keyword_weight = 0.3
+
+[memory.shared]
+path = "./data/memory/shared"
+# Who can contribute to shared memory
+contributors = ["admin@localhost"]
+```
 
 ---
 

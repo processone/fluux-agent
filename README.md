@@ -50,7 +50,7 @@ Fluux Agent brings these two worlds together: the power of modern AI agents with
 
 - **Open and federated** — Agents communicate over XMPP, an open standard with native federation. No vendor lock-in, no centralized platform. Your agent, your server, your rules.
 - **Total decoupling** — The agent is a standard XMPP component. It works with any XMPP server, not just ejabberd.
-- **Security by design** — Defense-in-depth with 5 independent layers: declarative capabilities, action validation, Wasm sandbox, kernel sandboxing (Landlock/seccomp), and process isolation. The LLM never directly touches the system. See [Security Architecture](docs/SECURITY.md).
+- **Security by design** — Defense-in-depth with 5 independent layers: declarative capabilities, action validation, Wasm sandbox, kernel sandboxing (Landlock/seccomp), and process isolation. The LLM never directly touches the system. In corporate deployments, the agent will be able to scan conversations and detect prompt injection attempts, limiting the risk of adversarial manipulation through crafted messages. See [Security Architecture](docs/SECURITY.md).
 - **Proactivity** — Cron jobs, PubSub subscriptions, webhooks. The agent can initiate conversations, not just respond.
 - **Federation** — My agent `agent.domain-a.com` talks to your agent `agent.domain-b.com` via XMPP federation. No centralized platform.
 
@@ -80,7 +80,7 @@ Fluux Agent starts as a personal AI assistant — one user, one agent, one LLM. 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | **v0.1** | XMPP component + C2S client + agentic loop + Claude API + markdown memory + sessions + slash commands | 🚧 In progress |
-| **v0.2** | Skills system, model tiering, Ollama support, proactive context learning | Planned |
+| **v0.2** | Skills system, model tiering, Ollama support, proactive context learning, prompt injection detection | Planned |
 | **v0.3** | Proactivity (cron via PubSub, heartbeat) | Planned |
 | **v0.4** | Wasm sandbox (wasmtime) + Landlock | Planned |
 | **v0.5** | Agent protocol (`urn:fluux:agent:0`) — discovery, execute, confirm | Planned |
