@@ -1024,6 +1024,8 @@ A discovery mechanism where a new user can "pair" with the agent by exchanging a
 Ollama (local models) and Anthropic are covered in v0.2. Future providers:
 
 - OpenAI / GPT-4o — useful for `vision` tier or as alternative `standard`
+- Google Gemini — competitive reasoning and vision capabilities
+- DeepSeek — cost-effective reasoning model
 - Mistral API — European hosting, GDPR-friendly
 - Automatic fallback chain (try Claude, fall back to local Ollama if API is down)
 - All configured per-tier in TOML — no code changes needed to switch providers
