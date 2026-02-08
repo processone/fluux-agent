@@ -139,6 +139,24 @@ The agent can do things beyond conversation.
 - [ ] Builtin skill: URL fetch and summarize
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
 - [ ] Cost estimation and per-JID quota (token tracking, usage limits, `/usage` command)
+- [ ] Multiple agent identities (per-JID override, switchable personas via `/identity`)
+
+### Multiple agent identities
+
+A single Fluux Agent instance can serve different personas depending on context. Three levels of identity resolution, from most specific to global:
+
+1. **Per-JID identity override** — A `{jid}/identity.md` file in a JID directory overrides the global `identity.md` for that conversation. Useful for rooms or specific users that need a specialized persona (e.g., a support room gets a support identity, while direct messages get a general assistant).
+
+2. **Named identities** — Multiple identity files in a `data/memory/identities/` directory (e.g., `support.md`, `dev-assistant.md`, `tutor.md`). Users switch via a `/identity <name>` command, which is stored in their JID directory and persists across sessions.
+
+3. **Multi-bot deployment** — One process serving multiple XMPP accounts or component subdomains, each with its own workspace directory. This is a deployment/config concern, not a code change.
+
+Resolution order: `{jid}/identity.md` → user's chosen identity (from `/identity` command) → global `identity.md` → hardcoded fallback.
+
+**Use cases:**
+- A company runs one agent but wants it to behave as a "coding mentor" in the dev room and a "support agent" in the customer channel
+- A user wants to switch between "creative writing partner" and "technical assistant" depending on the conversation topic
+- A tutoring platform deploys one agent per student, each with a per-JID identity tailored to the student's level
 
 ### How skills are exposed to the LLM
 
