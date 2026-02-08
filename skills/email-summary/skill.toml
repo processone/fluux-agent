@@ -1,0 +1,36 @@
+# Exemple de manifest de skill — pour v0.2+
+#
+# Chaque skill déclare ses capabilities requises.
+# Le runtime valide ces capabilities AVANT d'exécuter le skill.
+# L'utilisateur approuve les capabilities au premier lancement.
+
+[skill]
+id = "email-summary"
+name = "Email Summary"
+version = "0.1.0"
+description = "Résume les emails non lus du matin"
+author = "ProcessOne"
+
+[skill.capabilities]
+# Accès réseau : uniquement IMAPS vers ce serveur
+network = ["imaps://mail.processone.net"]
+
+# Accès filesystem : écriture uniquement dans ce répertoire
+# filesystem_read = []
+filesystem_write = ["~/agent/output/"]
+
+# Accès LLM : modèle et budget tokens
+llm = { model = "claude-sonnet-4-5-20250929", max_tokens = 4000 }
+
+# Pas d'accès shell
+shell = false
+
+# Pas d'accès navigateur
+browser = false
+
+# --- Proactivité (optionnel) ---
+[skill.schedule]
+# Exécution automatique lundi-vendredi à 7h
+cron = "0 7 * * 1-5"
+# Notifier cet utilisateur
+notify = "mickael@processone.net"

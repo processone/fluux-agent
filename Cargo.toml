@@ -1,0 +1,63 @@
+[package]
+name = "fluux-agent"
+version = "0.1.0"
+edition = "2021"
+authors = ["ProcessOne <contact@process-one.net>"]
+description = "An AI agent runtime that connects to any XMPP server via component protocol"
+license = "Apache-2.0"
+repository = "https://github.com/processone/fluux-agent"
+readme = "README.md"
+keywords = ["xmpp", "ai", "agent", "llm", "jabber"]
+categories = ["network-programming"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# XMPP — on part sur une implémentation manuelle du component protocol
+# xmpp-rs est trop haut niveau et orienté client, pas composant
+tokio-native-tls = "0.3"
+
+# XML parsing pour les stanzas XMPP
+quick-xml = { version = "0.36", features = ["async-tokio"] }
+
+# HTTP client pour l'API LLM
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Sérialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto (SHA-1 for XEP-0114 handshake + SASL SCRAM)
+sha1 = "0.10"
+hex = "0.4"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+base64 = "0.22"
+rand = "0.8"
+native-tls = "0.2"
+
+# Async utils
+futures = "0.3"
+
+# Identifiants uniques
+uuid = { version = "1", features = ["v4"] }
+
+# SSE streaming (pour Claude API)
+eventsource-stream = "0.2"
+reqwest-eventsource = "0.6"
+
+# Env var substitution dans la config
+shellexpand = "3"
+anyhow = "1.0.101"
+
+# Date/time (session timestamps)
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

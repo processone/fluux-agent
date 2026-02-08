@@ -1,0 +1,29 @@
+# Build artifacts
+/target
+
+# Agent runtime data (memory, sessions)
+/data
+
+# Local config (contains secrets via env vars)
+config/agent.toml
+
+# Environment files
+.env
+.env.*
+
+# SQLite (legacy, if any)
+*.db
+*.db-journal
+
+# macOS
+.DS_Store
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/

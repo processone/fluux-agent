@@ -1,0 +1,65 @@
+# Fluux Agent — Configuration
+#
+# Copy this file to agent.toml and adapt the values.
+# Environment variables are supported: ${VAR_NAME}
+
+# --- Connection mode: "component" (XEP-0114) or "client" (C2S) ---
+
+# Option A: External component (XEP-0114)
+[server]
+host = "localhost"
+port = 5275
+mode = "component"
+component_domain = "agent.localhost"
+component_secret = "${AGENT_SECRET}"
+
+# Option B: C2S client (connect as a regular XMPP user)
+# [server]
+# host = "localhost"
+# port = 5222
+# mode = "client"
+# jid = "bot@localhost"
+# password = "${BOT_PASSWORD}"
+# resource = "fluux-agent"
+# tls_verify = false  # set to false for self-signed certs (dev)
+
+[llm]
+# LLM provider (only "anthropic" is supported in v0.1)
+provider = "anthropic"
+# Model to use
+model = "claude-sonnet-4-5-20250929"
+# API key (use an environment variable!)
+api_key = "${ANTHROPIC_API_KEY}"
+# Max tokens per request
+max_tokens_per_request = 4096
+
+[agent]
+# Agent display name
+name = "Fluux Agent"
+# JIDs allowed to talk to the agent
+# Use "*" to allow everyone (not recommended in production)
+allowed_jids = [
+    "admin@localhost",
+]
+
+[memory]
+# Memory backend: "markdown" (human-readable files, OpenClaw-compatible)
+backend = "markdown"
+# Base directory for memory files (one subdirectory per user JID)
+path = "./data/memory"
+
+# --- Future sections (v0.2+) ---
+
+# [sandbox]
+# enable_landlock = true
+# enable_seccomp = true
+# wasm_fuel_limit = 1_000_000
+# wasm_memory_max_mb = 64
+
+# [proactive]
+# enable = true
+#
+# [[proactive.jobs]]
+# skill = "email-summary"
+# cron = "0 7 * * 1-5"
+# notify = "admin@localhost"
