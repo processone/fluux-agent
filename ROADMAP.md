@@ -659,16 +659,16 @@ If a task truly requires multi-level decomposition, the orchestrating agent shou
 
 Each sub-agent runs in an isolated session. When a named agent config is specified, the sub-agent inherits its persona, skills allowlist, instructions, and model:
 
-| Aspect | Main agent | Sub-agent |
-|--------|-----------|-----------|
-| Conversation history | Full user history | Empty (only the task prompt) |
-| System prompt | Global persona + per-JID overrides | Named agent's `persona` + `instructions`, or parent's prompt if unnamed |
-| Workspace files | Per-JID overrides | Inherits main agent's workspace |
-| Memory access | Full read/write | Read-only (no side effects) |
-| Tool set | All skills + `spawn_agent` | Named agent's `skills` allowlist (no `spawn_agent`). If unnamed, inherits parent's skills minus `spawn_agent`. |
-| XMPP messaging | Can send messages | Cannot send messages directly |
-| Model | Config default | Named agent's `model`, or skill tier, or config default |
-| Token limit | `max_tokens_per_request` | Named agent's `max_tokens`, or config default |
+| Aspect               | Main agent                         | Sub-agent                                                                                                      |
+|----------------------|------------------------------------|----------------------------------------------------------------------------------------------------------------|
+| Conversation history | Full user history                  | Empty (only the task prompt)                                                                                   |
+| System prompt        | Global persona + per-JID overrides | Named agent's `persona` + `instructions`, or parent's prompt if unnamed                                        |
+| Workspace files      | Per-JID overrides                  | Inherits main agent's workspace                                                                                |
+| Memory access        | Full read/write                    | Read-only (no side effects)                                                                                    |
+| Tool set             | All skills + `spawn_agent`         | Named agent's `skills` allowlist (no `spawn_agent`). If unnamed, inherits parent's skills minus `spawn_agent`. |
+| XMPP messaging       | Can send messages                  | Cannot send messages directly                                                                                  |
+| Model                | Config default                     | Named agent's `model`, or skill tier, or config default                                                        |
+| Token limit          | `max_tokens_per_request`           | Named agent's `max_tokens`, or config default                                                                  |
 
 #### Result flow
 
