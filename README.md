@@ -94,11 +94,11 @@ Fluux Agent starts as a personal AI assistant — one user, one agent, one LLM. 
 - An XMPP server (ejabberd, Prosody, Openfire...)
 - An Anthropic API key (Claude)
 
-Two connection modes are supported:
+Two connection modes are supported, suited to different deployment contexts:
 
-**Component mode (XEP-0114)** — The agent registers as a subdomain (e.g., `agent.localhost`). Requires server-side configuration but gives the agent its own address namespace.
+**Client mode (C2S)** — The agent connects as a regular XMPP user (e.g., `bot@localhost`). No server configuration needed beyond a user account. Supports SASL PLAIN, SCRAM-SHA-1, and STARTTLS. **This is the easiest way to get started** — ideal for individuals and small teams who just want a personal AI assistant on their existing XMPP server.
 
-**Client mode (C2S)** — The agent connects as a regular XMPP user (e.g., `bot@localhost`). No server configuration needed beyond a user account. Supports SASL PLAIN, SCRAM-SHA-1, and STARTTLS.
+**Component mode (XEP-0114)** — The agent registers as a subdomain (e.g., `agent.localhost`). Requires server-side configuration but gives the agent its own address namespace, better isolation, and the ability to handle messages for an entire subdomain. **Companies and organizations** will typically prefer this mode for production deployments — it integrates the agent as a first-class service on the XMPP infrastructure rather than as a regular user account.
 
 ### ejabberd Configuration (component mode)
 

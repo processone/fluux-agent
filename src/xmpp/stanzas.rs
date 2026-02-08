@@ -15,6 +15,7 @@ pub struct IncomingMessage {
 
 /// Builds an outgoing XMPP message.
 /// `from` is Some for component mode, None for C2S (server adds it).
+/// Includes `<active/>` chat state (XEP-0085) to signal we've stopped typing.
 pub fn build_message(from: Option<&str>, to: &str, body: &str, id: Option<&str>) -> String {
     let from_attr = from
         .map(|f| format!(" from='{f}'"))
@@ -25,6 +26,38 @@ pub fn build_message(from: Option<&str>, to: &str, body: &str, id: Option<&str>)
     format!(
         "<message{from_attr} to='{to}' type='chat'{id_attr}>\
          <body>{body}</body>\
+         <active xmlns='http://jabber.org/protocol/chatstates'/>\
+         </message>"
+    )
+}
+
+// ── Chat state notifications (XEP-0085, outbound) ────────
+
+/// Builds a standalone `<composing/>` chat state notification.
+/// Sent when the agent starts generating a response (LLM call begins).
+/// `from` is Some for component mode, None for C2S.
+pub fn build_chat_state_composing(from: Option<&str>, to: &str) -> String {
+    let from_attr = from
+        .map(|f| format!(" from='{f}'"))
+        .unwrap_or_default();
+    format!(
+        "<message{from_attr} to='{to}' type='chat'>\
+         <composing xmlns='http://jabber.org/protocol/chatstates'/>\
+         </message>"
+    )
+}
+
+/// Builds a standalone `<paused/>` chat state notification.
+/// Sent when the agent stops generating without sending a message
+/// (e.g., error during LLM call, or cancelled request).
+/// `from` is Some for component mode, None for C2S.
+pub fn build_chat_state_paused(from: Option<&str>, to: &str) -> String {
+    let from_attr = from
+        .map(|f| format!(" from='{f}'"))
+        .unwrap_or_default();
+    format!(
+        "<message{from_attr} to='{to}' type='chat'>\
+         <paused xmlns='http://jabber.org/protocol/chatstates'/>\
          </message>"
     )
 }
@@ -475,6 +508,57 @@ mod tests {
                    <body>  Hello agent  </body></message>";
         let msg = parse_message(xml).unwrap();
         assert_eq!(msg.body, "Hello agent");
+    }
+
+    // ── Outbound chat state tests (XEP-0085) ─────────────
+
+    #[test]
+    fn test_build_message_includes_active_chat_state() {
+        let xml = build_message(None, "user@localhost", "Hello", None);
+        assert!(xml.contains("<active xmlns='http://jabber.org/protocol/chatstates'/>"));
+        assert!(xml.contains("<body>Hello</body>"));
+    }
+
+    #[test]
+    fn test_build_message_with_from_includes_active_chat_state() {
+        let xml = build_message(Some("agent.localhost"), "user@localhost", "Hi", None);
+        assert!(xml.contains("<active xmlns='http://jabber.org/protocol/chatstates'/>"));
+        assert!(xml.contains("from='agent.localhost'"));
+    }
+
+    #[test]
+    fn test_build_chat_state_composing_c2s() {
+        let xml = build_chat_state_composing(None, "user@localhost");
+        assert!(xml.contains("to='user@localhost'"));
+        assert!(xml.contains("<composing xmlns='http://jabber.org/protocol/chatstates'/>"));
+        assert!(xml.contains("type='chat'"));
+        assert!(!xml.contains("from="));
+        assert!(!xml.contains("<body"));
+    }
+
+    #[test]
+    fn test_build_chat_state_composing_component() {
+        let xml = build_chat_state_composing(Some("agent.localhost"), "user@localhost");
+        assert!(xml.contains("from='agent.localhost'"));
+        assert!(xml.contains("to='user@localhost'"));
+        assert!(xml.contains("<composing xmlns='http://jabber.org/protocol/chatstates'/>"));
+    }
+
+    #[test]
+    fn test_build_chat_state_paused_c2s() {
+        let xml = build_chat_state_paused(None, "user@localhost");
+        assert!(xml.contains("to='user@localhost'"));
+        assert!(xml.contains("<paused xmlns='http://jabber.org/protocol/chatstates'/>"));
+        assert!(xml.contains("type='chat'"));
+        assert!(!xml.contains("from="));
+        assert!(!xml.contains("<body"));
+    }
+
+    #[test]
+    fn test_build_chat_state_paused_component() {
+        let xml = build_chat_state_paused(Some("agent.localhost"), "user@localhost");
+        assert!(xml.contains("from='agent.localhost'"));
+        assert!(xml.contains("<paused xmlns='http://jabber.org/protocol/chatstates'/>"));
     }
 
     // ── Presence tests ──────────────────────────────────

@@ -21,7 +21,18 @@ pub enum XmppEvent {
 #[derive(Debug)]
 pub enum XmppCommand {
     SendMessage { to: String, body: String },
+    /// Send a chat state notification (XEP-0085) — composing, paused, etc.
+    SendChatState { to: String, state: ChatState },
     SendRaw(String),
+}
+
+/// Outbound chat state types (XEP-0085)
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatState {
+    /// Agent is generating a response (LLM call in progress)
+    Composing,
+    /// Agent stopped generating without sending a message (error, cancellation)
+    Paused,
 }
 
 /// XMPP Component (XEP-0114)
@@ -163,6 +174,14 @@ impl XmppComponent {
                     XmppCommand::SendMessage { to, body } => {
                         stanzas::build_message(Some(&domain), &to, &body, None)
                     }
+                    XmppCommand::SendChatState { to, state } => match state {
+                        ChatState::Composing => {
+                            stanzas::build_chat_state_composing(Some(&domain), &to)
+                        }
+                        ChatState::Paused => {
+                            stanzas::build_chat_state_paused(Some(&domain), &to)
+                        }
+                    },
                     XmppCommand::SendRaw(raw) => raw,
                 };
 

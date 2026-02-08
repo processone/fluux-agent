@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_native_tls::TlsConnector;
 use tracing::{debug, error, info, warn};
 
-use super::component::{XmppCommand, XmppEvent};
+use super::component::{ChatState, XmppCommand, XmppEvent};
 use super::sasl;
 use super::stanzas;
 use crate::config::{ConnectionMode, ServerConfig};
@@ -284,6 +284,14 @@ impl XmppClient {
                     XmppCommand::SendMessage { to, body } => {
                         stanzas::build_message(None, &to, &body, None)
                     }
+                    XmppCommand::SendChatState { to, state } => match state {
+                        ChatState::Composing => {
+                            stanzas::build_chat_state_composing(None, &to)
+                        }
+                        ChatState::Paused => {
+                            stanzas::build_chat_state_paused(None, &to)
+                        }
+                    },
                     XmppCommand::SendRaw(raw) => raw,
                 };
 

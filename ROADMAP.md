@@ -23,8 +23,8 @@ The minimum viable agent: connect, authenticate, converse, remember.
 - [x] Conversation sessions (`/new`, `/reset`, session archival)
 - [x] Slash commands (runtime-intercepted, never reach the LLM)
 - [x] Presence subscription for allowed JIDs (auto-subscribe + auto-accept)
+- [x] Typing indicators (outbound `<composing/>` / `<paused/>` / `<active/>`, XEP-0085)
 - [ ] Cross-domain message rejection (security default) — **next**
-- [ ] Typing indicators (outbound `<composing/>` while LLM is generating)
 - [ ] Reconnection with exponential backoff
 
 ### Conversation sessions ✓
@@ -51,11 +51,14 @@ Implemented: automatic roster integration in C2S mode.
 - **Presence tracking** — The read loop parses all `<presence>` stanzas (available, unavailable, subscribe, subscribed, unsubscribe, unsubscribed) and dispatches them as `XmppEvent::Presence` to the runtime.
 - **C2S only** — In component mode, the server handles routing differently. Presence subscription is a C2S concern.
 
-### Typing indicators (outbound)
+### Typing indicators (XEP-0085, outbound) ✓
 
-Send `<composing xmlns='http://jabber.org/protocol/chatstates'/>` while the LLM is generating a response, and `<active xmlns='http://jabber.org/protocol/chatstates'/>` when the response is sent. This gives users visual feedback that the agent is "thinking" — the same UX as a human typing in a chat app.
+Implemented: the agent sends proper XEP-0085 chat state notifications throughout the response lifecycle.
 
-Implementation: wrap the LLM call in runtime.rs with chat state stanzas sent via `XmppCommand::SendRaw`.
+- **`<composing/>`** — Sent immediately when the agent starts processing a non-slash-command message (before the LLM call). The user's XMPP client shows "bot is typing…".
+- **`<active/>`** — Bundled inside the response `<message>` stanza. Clears the typing indicator when the reply arrives. This is the XEP-0085 recommended pattern: chat state rides alongside the body.
+- **`<paused/>`** — Sent if the LLM call fails, before the error message. Properly signals that the agent stopped generating without successfully producing a response.
+- **Slash commands skip composing** — Commands like `/ping`, `/status` are instant and deterministic. No typing indicator is sent for them.
 
 ### Cross-domain message rejection
 
@@ -135,6 +138,7 @@ The agent can do things beyond conversation.
 - [ ] Builtin skill: web search
 - [ ] Builtin skill: URL fetch and summarize
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
+- [ ] Cost estimation and per-JID quota (token tracking, usage limits, `/usage` command)
 
 ### How skills are exposed to the LLM
 
@@ -385,6 +389,7 @@ The provider prefix (`anthropic:`, `ollama:`) in the tier string tells the runti
 
 The agent initiates, not just responds.
 
+- [ ] Groupchat support (MUC, XEP-0045) — join rooms, respond to mentions, use room-scoped memory
 - [ ] React to user presence changes (e.g., greet on login, trigger deferred tasks when user comes online)
 - [ ] React to user PEP events (XEP-0163) — mood, activity, tune, location, avatar changes
 - [ ] Cron-based scheduled tasks (via PubSub or internal scheduler)
@@ -408,6 +413,47 @@ XMPP Personal Eventing Protocol (PEP) lets users publish rich status information
 - **Context enrichment** — If a user publishes "mood: stressed", the agent can adjust its tone. If "activity: on the phone", it can defer non-urgent messages.
 - **Proactive suggestions** — Location changes could trigger travel-related reminders. Activity changes could prompt relevant information.
 - **Privacy-first** — PEP events are only processed for allowed JIDs. The agent never stores or forwards PEP data to third parties. PEP subscription is opt-in via config.
+
+### Groupchat support (MUC, XEP-0045)
+
+The agent can join XMPP Multi-User Chat rooms and participate in group conversations, using **room-scoped memory** instead of per-user memory:
+
+- **Room memory** — `{room_jid}/history.md` + `{room_jid}/context.md`. The agent builds shared context from group discussions (project names, decisions, recurring topics). This is separate from 1:1 per-user memory.
+- **Mention-based activation** — In a group room, the agent only responds when mentioned (e.g., `@agent what's the status?`). This prevents noise and respects the group conversation flow.
+- **Room configuration** — Rooms the agent should join are declared in TOML. The agent joins on connect and sends presence to the room.
+- **Participant awareness** — The agent knows who is in the room (via MUC presence) and can address responses to specific participants.
+- **Use cases** — Team standup assistant, project knowledge base, shared action tracking, meeting summaries posted to the room.
+
+```toml
+[rooms]
+# Rooms the agent joins on connect
+join = ["dev@conference.localhost", "standup@conference.localhost"]
+
+[rooms."dev@conference.localhost"]
+nick = "fluux-agent"
+# How the agent is activated: "mention" (default), "all" (respond to every message)
+activation = "mention"
+```
+
+### Cost estimation and per-JID quota
+
+Track LLM token usage per user and enforce configurable spending limits. This prevents runaway costs and lets operators control who consumes how many resources:
+
+- **Token tracking** — Every LLM call records input/output tokens per bare JID. Stored in memory alongside conversation data.
+- **Cost estimation** — Map token counts to approximate USD cost based on model pricing (configurable per-model in TOML).
+- **Per-JID quotas** — Configurable daily/monthly token or cost limits per user. When a user exceeds their quota, the agent responds with a friendly limit message instead of calling the LLM.
+- **`/usage` command** — Users can check their own token consumption and remaining quota.
+- **Admin visibility** — Admin JIDs can query any user's usage via `/usage <jid>`.
+
+```toml
+[quota]
+# Default daily token limit per user (0 = unlimited)
+daily_tokens = 100000
+# Per-model cost (USD per million tokens) for estimation
+[quota.cost]
+"claude-sonnet-4-5-20250929" = { input = 3.0, output = 15.0 }
+"claude-haiku-3-5-20241022" = { input = 0.25, output = 1.25 }
+```
 
 ---
 

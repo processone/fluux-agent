@@ -4,7 +4,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::llm::{AnthropicClient, Message};
-use crate::xmpp::component::{XmppCommand, XmppEvent};
+use crate::xmpp::component::{ChatState, XmppCommand, XmppEvent};
 use crate::xmpp::stanzas::PresenceType;
 
 use super::memory::Memory;
@@ -55,15 +55,25 @@ impl AgentRuntime {
 
                     info!("Processing message from {}: {}", msg.from, msg.body);
 
-                    // Slash commands are intercepted before the LLM
+                    // Slash commands are intercepted before the LLM — instant, no typing indicator
                     let response = if msg.body.starts_with('/') {
                         self.handle_command(&msg.from, &msg.body)
                     } else {
+                        // Send <composing/> before the LLM call so the user sees "typing..."
+                        let _ = cmd_tx
+                            .send(XmppCommand::SendChatState {
+                                to: msg.from.clone(),
+                                state: ChatState::Composing,
+                            })
+                            .await;
+
                         self.handle_message(&msg.from, &msg.body).await
                     };
 
                     match response {
                         Ok(text) => {
+                            // The response message includes <active/> chat state,
+                            // which clears the "typing..." indicator on the client.
                             let _ = cmd_tx
                                 .send(XmppCommand::SendMessage {
                                     to: msg.from.clone(),
@@ -73,6 +83,13 @@ impl AgentRuntime {
                         }
                         Err(e) => {
                             error!("Error processing message: {e}");
+                            // Send <paused/> to clear "typing..." before the error message
+                            let _ = cmd_tx
+                                .send(XmppCommand::SendChatState {
+                                    to: msg.from.clone(),
+                                    state: ChatState::Paused,
+                                })
+                                .await;
                             let _ = cmd_tx
                                 .send(XmppCommand::SendMessage {
                                     to: msg.from.clone(),
