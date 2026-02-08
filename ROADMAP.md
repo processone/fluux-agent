@@ -131,6 +131,7 @@ The agent can do things beyond conversation.
 
 - [ ] Skill trait and registry
 - [ ] LLM tool use integration (agentic loop)
+- [ ] Sub-agent spawning (built-in runtime tool, one level deep)
 - [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides
 - [ ] `LlmClient` trait + Ollama provider (local models via Ollama API)
 - [ ] Declarative skill capabilities (TOML manifests)
@@ -546,9 +547,9 @@ A typical flow for image analysis:
 3. Vision model analyzes → returns text
 4. If follow-up conversation → drops back to `standard` tier
 
-#### Sub-agent model overrides
+#### Named agent definitions
 
-When a skill or delegated task spawns a sub-agent (an independent LLM call chain with its own system prompt and context), the operator can assign it a specific model that differs from the tier defaults. This gives fine-grained control over cost and capability per sub-agent:
+When a skill or delegated task spawns a sub-agent (an independent LLM call chain with its own system prompt and context), the operator defines it as a **named agent** in TOML. Each named agent is a complete profile — not just a model override, but a full definition of what the agent can do, how it behaves, and what it has access to:
 
 ```toml
 [llm.tiers]
@@ -556,27 +557,158 @@ heavy = "anthropic:claude-sonnet-4-5-20250929"
 standard = "anthropic:claude-sonnet-4-5-20250929"
 light = "ollama:llama3.1:8b"
 
-# Per sub-agent model overrides
-[llm.agents.code-reviewer]
+# Named agent definitions
+[llm.agents.researcher]
 model = "anthropic:claude-sonnet-4-5-20250929"
+persona = "researcher"                          # Persona package to use (from data/memory/personas/)
+skills = ["web_search", "url_fetch"]            # Skills this agent can access (allowlist)
+max_tokens = 4096                               # Per-request token limit
 
 [llm.agents.summarizer]
 model = "ollama:llama3.1:8b"
+instructions = "Summarize concisely in 3 bullet points. Never exceed 200 words."
+skills = []                                     # No tool access — pure text generation
+
+[llm.agents.code-reviewer]
+model = "anthropic:claude-sonnet-4-5-20250929"
+persona = "code-reviewer"
+skills = ["web_search", "url_fetch"]
+instructions = "Focus on correctness, security, and performance. Be direct."
+max_tokens = 8192
 
 [llm.agents.translator]
 model = "ollama:mistral:7b"
+instructions = "Translate accurately, preserving tone and intent. Return only the translation."
+skills = []
 ```
 
-Resolution order: `[llm.agents.<name>].model` → skill manifest `tier` → `[llm.tiers]` default.
+**Agent definition fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `model` | No | Model identifier (provider:model). Falls back to tier default. |
+| `persona` | No | Persona package name. Loads identity, personality, instructions from the persona directory. |
+| `instructions` | No | Inline system prompt override. If both `persona` and `instructions` are set, instructions are appended to the persona's prompt. |
+| `skills` | No | Allowlist of skills the agent can use. If omitted, inherits the parent's full skill set. If set to `[]`, the agent has no tool access. |
+| `max_tokens` | No | Per-request token limit. Falls back to `[llm].max_tokens_per_request`. |
+
+Resolution order for model: `[llm.agents.<name>].model` → skill manifest `tier` → `[llm.tiers]` default.
+
+Resolution order for system prompt: `instructions` field → `persona` package → parent agent's prompt.
+
+**The agent list is operator-defined, not hardcoded.** The runtime does not ship with predefined agents. Whatever names appear under `[llm.agents.*]` become available to the `spawn_agent` tool. The LLM sees the list of available agent names in its tool description and chooses which to spawn based on the task.
 
 **Use cases:**
 
-- **Cost control** — A summarizer sub-agent runs on a cheap local model, while a code-review sub-agent uses the strongest reasoning model. The operator chooses per sub-agent rather than per tier.
-- **Specialization** — A translator sub-agent uses a model fine-tuned for multilingual tasks. A math sub-agent uses a model with strong arithmetic capabilities. Each sub-agent gets the best model for its job.
+- **Cost control** — A summarizer sub-agent runs on a cheap local model with no tool access, while a code-review sub-agent uses the strongest reasoning model with full skills. The operator chooses per sub-agent rather than per tier.
+- **Specialization** — A translator sub-agent uses a model fine-tuned for multilingual tasks with constrained instructions. A researcher sub-agent gets web search skills and a research-focused persona. Each agent gets exactly the model, tools, and behavior profile its job requires.
+- **Security isolation** — A sub-agent that only needs to summarize text gets `skills = []` — no tool access at all. A sub-agent that needs web access gets only `["web_search", "url_fetch"]`. The operator controls the blast radius per agent.
 - **Development vs. production** — During development, override all sub-agents to use a local Ollama model for fast iteration. In production, point critical sub-agents at Claude while keeping routine ones local.
-- **Agent-to-agent federation (v1.0)** — When agent A delegates a task to agent B, agent B's model config is independent. Sub-agent overrides are the single-process version of this pattern — they establish the config shape that later maps to federated agents.
+- **Agent-to-agent federation (v1.0)** — When agent A delegates a task to agent B, agent B's model config is independent. Named agent definitions are the single-process version of this pattern — they establish the config shape that later maps to federated agents, where each `[llm.agents.*]` entry could become a remote JID.
 
-Sub-agent overrides compose with tier escalation: a sub-agent can start at its configured model but escalate to `heavy` if the agentic loop determines the task requires deeper reasoning.
+Named agent definitions compose with tier escalation: a sub-agent can start at its configured model but escalate to `heavy` if the agentic loop determines the task requires deeper reasoning.
+
+### Sub-agent spawning
+
+Sub-agent spawning is a **core runtime capability**, not a skill. The runtime exposes a built-in `spawn_agent` tool to the LLM, which the model can invoke to delegate subtasks to independent worker sessions. This follows the same architectural pattern as OpenClaw's `sessions_spawn`: the orchestrating LLM decides when task decomposition is warranted, and the runtime manages the lifecycle.
+
+#### Why a built-in tool, not a skill
+
+Skills are sandboxed, capability-restricted modules for interacting with external services. Sub-agent spawning is fundamentally different — it creates new LLM sessions within the runtime itself, with access to memory, tools, and XMPP messaging. Making it a built-in tool means:
+
+- **No capability escape** — The runtime controls which sub-agents can be spawned and what they can access, rather than delegating this to a sandboxed module.
+- **Session isolation** — Each sub-agent gets its own conversation context, history, and tool set. The runtime manages this directly.
+- **Lifecycle management** — Timeouts, cancellation, result collection, and cleanup are runtime concerns.
+
+#### The `spawn_agent` tool
+
+Exposed to the LLM alongside skills in the `tools[]` array:
+
+```json
+{
+  "name": "spawn_agent",
+  "description": "Spawn a sub-agent to handle a subtask independently. The sub-agent runs with its own context and returns the result when done.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "task": { "type": "string", "description": "The task for the sub-agent" },
+      "agent_name": { "type": "string", "description": "Named agent config from [llm.agents.*]" },
+      "timeout_seconds": { "type": "integer", "description": "Max execution time (default: 120)" }
+    },
+    "required": ["task"]
+  }
+}
+```
+
+The LLM decides when to spawn. Typical triggers:
+- Complex request that benefits from decomposition (research + summarize + format)
+- Parallel independent subtasks (translate to 3 languages simultaneously)
+- Task requiring a specialized model (code review needs heavy reasoning)
+
+#### One level deep — no recursive spawning
+
+Sub-agents **cannot spawn further sub-agents**. This is enforced by the runtime: the `spawn_agent` tool is not included in a sub-agent's tool set. This prevents:
+
+- Unbounded recursion and runaway costs
+- Complex dependency chains that are hard to debug
+- Context explosion from deeply nested agent trees
+
+If a task truly requires multi-level decomposition, the orchestrating agent should plan the full decomposition upfront and spawn all workers itself.
+
+#### Session isolation
+
+Each sub-agent runs in an isolated session. When a named agent config is specified, the sub-agent inherits its persona, skills allowlist, instructions, and model:
+
+| Aspect | Main agent | Sub-agent |
+|--------|-----------|-----------|
+| Conversation history | Full user history | Empty (only the task prompt) |
+| System prompt | Global persona + per-JID overrides | Named agent's `persona` + `instructions`, or parent's prompt if unnamed |
+| Workspace files | Per-JID overrides | Inherits main agent's workspace |
+| Memory access | Full read/write | Read-only (no side effects) |
+| Tool set | All skills + `spawn_agent` | Named agent's `skills` allowlist (no `spawn_agent`). If unnamed, inherits parent's skills minus `spawn_agent`. |
+| XMPP messaging | Can send messages | Cannot send messages directly |
+| Model | Config default | Named agent's `model`, or skill tier, or config default |
+| Token limit | `max_tokens_per_request` | Named agent's `max_tokens`, or config default |
+
+#### Result flow
+
+```
+User message
+    ↓
+Main agent (agentic loop)
+    ↓
+LLM decides: "I need to research X and summarize Y in parallel"
+    ↓
+tool_use: spawn_agent(task="research X", agent_name="researcher")
+tool_use: spawn_agent(task="summarize Y", agent_name="summarizer")
+    ↓
+Runtime spawns two sub-agent sessions concurrently
+    ↓
+Sub-agents complete → results returned as tool_result
+    ↓
+Main agent synthesizes results → final response to user
+```
+
+#### Configuration
+
+Sub-agent spawning is enabled by default but can be restricted:
+
+```toml
+[agent]
+# Sub-agent limits
+max_concurrent_subagents = 3    # Per conversation (default: 3)
+subagent_timeout = 120          # Default timeout in seconds
+allow_subagents = true          # Set to false to disable entirely
+
+# Named agent definitions live under [llm.agents.*] (see "Named agent definitions" above).
+# The agent_name parameter in spawn_agent maps to these definitions.
+# If spawn_agent is called without an agent_name, the sub-agent inherits the parent's
+# config minus spawn_agent access.
+```
+
+#### XMPP-native sub-agents (v1.0)
+
+In v1.0 (federation), sub-agent spawning evolves into agent-to-agent delegation over XMPP. Instead of spawning an in-process session, the orchestrating agent sends a task to another XMPP agent via IQ stanza. The config shape is the same — `[llm.agents.*]` — but the runtime dispatches to a remote JID instead of a local session. This is why sub-agent spawning is designed as a runtime capability from the start: the abstraction must support both local and federated execution.
 
 ### Local models via Ollama
 
