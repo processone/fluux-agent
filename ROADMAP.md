@@ -188,12 +188,12 @@ max_tokens_per_message = 4096
 
 #### Slash commands
 
-| Command | Description |
-|---------|-------------|
-| `/persona` | Show current active persona |
-| `/persona list` | List all available personas |
+| Command           | Description                   |
+|-------------------|-------------------------------|
+| `/persona`        | Show current active persona   |
+| `/persona list`   | List all available personas   |
 | `/persona <name>` | Switch to a different persona |
-| `/persona reset` | Return to default persona |
+| `/persona reset`  | Return to default persona     |
 
 Example interaction:
 
@@ -264,13 +264,13 @@ allowed = ["*"]
 
 Beyond admin-defined global personas, users can create their own custom personas:
 
-| Command | Description |
-|---------|-------------|
+| Command                  | Description                                |
+|--------------------------|--------------------------------------------|
 | `/persona create <name>` | Start creating a new persona interactively |
-| `/persona edit <name>` | Modify an existing user persona |
-| `/persona delete <name>` | Remove a user-created persona |
-| `/persona export <name>` | Export persona as shareable TOML |
-| `/persona import` | Import a shared persona |
+| `/persona edit <name>`   | Modify an existing user persona            |
+| `/persona delete <name>` | Remove a user-created persona              |
+| `/persona export <name>` | Export persona as shareable TOML           |
+| `/persona import`        | Import a shared persona                    |
 
 **Conversational creation** — Creating a persona is interactive:
 
@@ -693,7 +693,7 @@ The agent acts as an **MCP client**, spawning and managing MCP servers as child 
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐
-│                  Skill Registry                      │
+│                  Skill Registry                     │
 ├─────────────────┬───────────────┬───────────────────┤
 │  Native Wasm    │   Builtin     │    MCP Bridge     │
 │  (v0.4)         │   (v0.2)      │    (v0.3)         │
