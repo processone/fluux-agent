@@ -92,13 +92,38 @@ impl Memory {
         }
     }
 
+    /// Reads a workspace file with per-JID override support.
+    ///
+    /// Checks `{jid}/{filename}` first — if present and non-empty, it wins.
+    /// Otherwise falls back to the global `{base_path}/{filename}`.
+    ///
+    /// This lets rooms (or individual users) override identity, personality,
+    /// or instructions by placing files in their memory directory.
+    fn get_workspace_file(&self, jid: &str, filename: &str) -> Result<Option<String>> {
+        // Per-JID override
+        let local_path = self.base_path.join(jid).join(filename);
+        if local_path.exists() {
+            let content = fs::read_to_string(&local_path)?;
+            if !content.trim().is_empty() {
+                return Ok(Some(content));
+            }
+        }
+
+        // Global fallback
+        self.get_global_file(filename)
+    }
+
     /// Assembles the full workspace context for a JID.
-    /// Reads all 3 global files + per-JID user profile and memory.
+    ///
+    /// For instructions, identity, and personality: checks the per-JID
+    /// directory first (e.g., `{room_jid}/instructions.md`), falling back
+    /// to the global file. This allows per-room or per-user identity
+    /// without any config changes — just drop files into the JID directory.
     pub fn get_workspace_context(&self, jid: &str) -> Result<WorkspaceContext> {
         Ok(WorkspaceContext {
-            instructions: self.get_global_file("instructions.md")?,
-            identity: self.get_global_file("identity.md")?,
-            personality: self.get_global_file("personality.md")?,
+            instructions: self.get_workspace_file(jid, "instructions.md")?,
+            identity: self.get_workspace_file(jid, "identity.md")?,
+            personality: self.get_workspace_file(jid, "personality.md")?,
             user_profile: self.get_user_profile(jid)?,
             user_memory: self.get_user_memory(jid)?,
         })
@@ -1062,6 +1087,118 @@ New message with JID
         assert_eq!(history[1].role, "user");
         assert_eq!(history[2].role, "user");
         assert_eq!(history[3].role, "assistant");
+    }
+
+    // ── Per-JID workspace override tests ────────────────
+
+    #[test]
+    fn test_workspace_context_per_jid_override_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        // Create global files
+        fs::write(dir.path().join("instructions.md"), "Global instructions").unwrap();
+        fs::write(dir.path().join("identity.md"), "Global identity").unwrap();
+        fs::write(dir.path().join("personality.md"), "Global personality").unwrap();
+
+        // Create per-room overrides
+        let room = "lobby@conference.localhost";
+        let room_dir = dir.path().join(room);
+        fs::create_dir_all(&room_dir).unwrap();
+        fs::write(room_dir.join("instructions.md"), "Room instructions").unwrap();
+        fs::write(room_dir.join("identity.md"), "Room identity").unwrap();
+        fs::write(room_dir.join("personality.md"), "Room personality").unwrap();
+
+        // Room context should use per-room files
+        let ctx = memory.get_workspace_context(room).unwrap();
+        assert_eq!(ctx.instructions.unwrap(), "Room instructions");
+        assert_eq!(ctx.identity.unwrap(), "Room identity");
+        assert_eq!(ctx.personality.unwrap(), "Room personality");
+
+        // Other JID should still get global files
+        let ctx2 = memory.get_workspace_context("user@localhost").unwrap();
+        assert_eq!(ctx2.instructions.unwrap(), "Global instructions");
+        assert_eq!(ctx2.identity.unwrap(), "Global identity");
+        assert_eq!(ctx2.personality.unwrap(), "Global personality");
+    }
+
+    #[test]
+    fn test_workspace_context_partial_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        // Create global files
+        fs::write(dir.path().join("instructions.md"), "Global instructions").unwrap();
+        fs::write(dir.path().join("identity.md"), "Global identity").unwrap();
+        fs::write(dir.path().join("personality.md"), "Global personality").unwrap();
+
+        // Override only instructions for a room
+        let room = "support@conference.localhost";
+        let room_dir = dir.path().join(room);
+        fs::create_dir_all(&room_dir).unwrap();
+        fs::write(room_dir.join("instructions.md"), "Support room rules").unwrap();
+
+        let ctx = memory.get_workspace_context(room).unwrap();
+        assert_eq!(ctx.instructions.unwrap(), "Support room rules");
+        assert_eq!(ctx.identity.unwrap(), "Global identity");
+        assert_eq!(ctx.personality.unwrap(), "Global personality");
+    }
+
+    #[test]
+    fn test_workspace_context_empty_override_falls_back_to_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        // Create global file
+        fs::write(dir.path().join("identity.md"), "Global identity").unwrap();
+
+        // Create empty per-room override (should be ignored)
+        let room = "dev@conference.localhost";
+        let room_dir = dir.path().join(room);
+        fs::create_dir_all(&room_dir).unwrap();
+        fs::write(room_dir.join("identity.md"), "   \n  ").unwrap();
+
+        let ctx = memory.get_workspace_context(room).unwrap();
+        assert_eq!(ctx.identity.unwrap(), "Global identity");
+    }
+
+    #[test]
+    fn test_workspace_context_per_user_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        // Create global identity
+        fs::write(dir.path().join("identity.md"), "I am a helpful assistant").unwrap();
+
+        // Per-user identity override for a specific JID
+        let jid = "vip@localhost";
+        let jid_dir = dir.path().join(jid);
+        fs::create_dir_all(&jid_dir).unwrap();
+        fs::write(jid_dir.join("identity.md"), "I am your personal concierge").unwrap();
+
+        let ctx = memory.get_workspace_context(jid).unwrap();
+        assert_eq!(ctx.identity.unwrap(), "I am your personal concierge");
+
+        // Other user still gets global
+        let ctx2 = memory.get_workspace_context("other@localhost").unwrap();
+        assert_eq!(ctx2.identity.unwrap(), "I am a helpful assistant");
+    }
+
+    #[test]
+    fn test_workspace_context_override_with_no_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        // No global files at all — per-room file still works
+        let room = "lab@conference.localhost";
+        let room_dir = dir.path().join(room);
+        fs::create_dir_all(&room_dir).unwrap();
+        fs::write(room_dir.join("instructions.md"), "Lab-specific rules").unwrap();
+
+        let ctx = memory.get_workspace_context(room).unwrap();
+        assert_eq!(ctx.instructions.unwrap(), "Lab-specific rules");
+        assert!(ctx.identity.is_none());
+        assert!(ctx.personality.is_none());
     }
 
     #[test]

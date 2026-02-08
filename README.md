@@ -234,6 +234,23 @@ The agent joins configured rooms on connect. It records all room messages for co
 
 Each room has its own isolated memory directory, just like 1:1 conversations — the room JID is used as the memory key. All participants in the same room share conversation context.
 
+### Per-room identity
+
+You can give the agent a different persona per room (or per user) by placing workspace files in the JID's memory directory. These override the global files:
+
+```
+data/memory/
+  identity.md                              # Global: "I am Fluux Agent"
+  instructions.md                          # Global rules
+  lobby@conference.localhost/
+    instructions.md                        # Room override: "You are a support bot..."
+  dev@conference.localhost/
+    identity.md                            # Room override: "I am DevBot"
+    personality.md                         # Room override: "Terse, technical"
+```
+
+The lookup order is: **per-JID file → global file → none**. If a per-JID file exists and is non-empty, it wins. Otherwise the global file is used. This works for rooms *and* individual users — no config changes needed, just drop files into the directory.
+
 ## Project Structure
 
 ```

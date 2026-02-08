@@ -22,7 +22,10 @@ data/memory/
 │   ├── history.md
 │   └── sessions/
 ├── room@conference.example.com/ # MUC room (same structure as users)
-│   ├── user.md                  # Room-specific context
+│   ├── instructions.md          # Room-specific override (optional)
+│   ├── identity.md              # Room-specific override (optional)
+│   ├── personality.md           # Room-specific override (optional)
+│   ├── user.md                  # Room-specific context ("about this room")
 │   ├── memory.md                # Room-specific notes
 │   ├── history.md
 │   └── sessions/
@@ -164,6 +167,42 @@ When global files exist, the system prompt is built as:
 5. Per-JID `memory.md` under a "Notes and memory" header
 
 When **no** global files exist, steps 1-3 are replaced by a hardcoded default prompt that uses the agent name from `config/agent.toml`.
+
+### Per-JID workspace overrides
+
+For steps 1-3, the agent checks the JID's own directory first before falling back to the global file:
+
+1. `{jid}/identity.md` → if present and non-empty, use it; else use global `identity.md`
+2. `{jid}/personality.md` → if present and non-empty, use it; else use global `personality.md`
+3. `{jid}/instructions.md` → if present and non-empty, use it; else use global `instructions.md`
+
+This lets you give different rooms (or users) their own persona without any config changes — just drop files into the JID directory.
+
+**Example — support room with custom instructions:**
+
+```
+data/memory/
+  identity.md                              # "I am Fluux Agent"
+  instructions.md                          # General rules
+  support@conference.example.com/
+    instructions.md                        # "You are a support bot. Always ask
+                                           #  for a ticket number. Escalate if
+                                           #  the user is frustrated."
+```
+
+The support room uses its local `instructions.md` but inherits the global `identity.md` and `personality.md`. Other rooms and users continue using the global files unchanged.
+
+**Example — room with a completely different identity:**
+
+```
+data/memory/
+  identity.md                              # "I am Fluux Agent"
+  dev@conference.example.com/
+    identity.md                            # "I am DevBot, the team's Rust expert"
+    personality.md                         # "Terse, technical, cites RFCs"
+```
+
+An empty or whitespace-only override file is ignored — the global file is used instead. This means you can't "blank out" a global file by creating an empty per-JID file.
 
 ## Per-JID files
 
