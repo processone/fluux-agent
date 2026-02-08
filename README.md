@@ -51,6 +51,7 @@ Fluux Agent brings these two worlds together: the power of modern AI agents with
 - **Open and federated** — Agents communicate over XMPP, an open standard with native federation. No vendor lock-in, no centralized platform. Your agent, your server, your rules.
 - **Total decoupling** — The agent is a standard XMPP component. It works with any XMPP server, not just ejabberd.
 - **Security by design** — Defense-in-depth with 5 independent layers: declarative capabilities, action validation, Wasm sandbox, kernel sandboxing (Landlock/seccomp), and process isolation. The LLM never directly touches the system. In corporate deployments, the agent will be able to scan conversations and detect prompt injection attempts, limiting the risk of adversarial manipulation through crafted messages. See [Security Architecture](docs/SECURITY.md).
+- **No public endpoint required** — XMPP acts as your inbound transport. The agent runs on your laptop or private network and connects to an XMPP server (your own or a public one like `conversations.im`). Services can reach your agent by sending XMPP messages — no need to expose webhooks or open firewall ports. This makes local development and secure production deployments trivial.
 - **Proactivity** — Cron jobs, PubSub subscriptions, webhooks. The agent can initiate conversations, not just respond.
 - **Federation** — My agent `agent.domain-a.com` talks to your agent `agent.domain-b.com` via XMPP federation. No centralized platform.
 
