@@ -140,24 +140,198 @@ The agent can do things beyond conversation.
 - [ ] Builtin skill: URL fetch and summarize
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
 - [ ] Cost estimation and per-JID quota (token tracking, usage limits, `/usage` command)
-- [ ] Multiple agent identities (per-JID override, switchable personas via `/identity`)
+- [ ] Persona packages (bundled identity/personality/instructions, `/persona` commands)
 
-### Multiple agent identities
+### Persona packages
 
-A single Fluux Agent instance can serve different personas depending on context. Three levels of identity resolution, from most specific to global:
+A **persona** is a complete personality configuration that bundles multiple aspects of how the agent behaves. Rather than switching just an identity file, users can switch entire persona packages that include identity, personality, instructions, and custom context.
 
-1. **Per-JID identity override** — A `{jid}/identity.md` file in a JID directory overrides the global `identity.md` for that conversation. Useful for rooms or specific users that need a specialized persona (e.g., a support room gets a support identity, while direct messages get a general assistant).
+#### Persona structure
 
-2. **Named identities** — Multiple identity files in a `data/memory/identities/` directory (e.g., `support.md`, `dev-assistant.md`, `tutor.md`). Users switch via a `/identity <name>` command, which is stored in their JID directory and persists across sessions.
+Each persona is a directory containing the files that define it:
 
-3. **Multi-bot deployment** — One process serving multiple XMPP accounts or component subdomains, each with its own workspace directory. This is a deployment/config concern, not a code change.
+```
+data/memory/personas/
+├── coding-mentor/
+│   ├── persona.toml          # Metadata and settings
+│   ├── identity.md           # Who the agent is
+│   ├── personality.md        # Tone, style, quirks
+│   ├── instructions.md       # Behavioral rules
+│   └── context.md            # Domain knowledge (optional)
+├── support-agent/
+│   ├── persona.toml
+│   ├── identity.md
+│   ├── personality.md
+│   └── instructions.md
+└── creative-writer/
+    └── ...
+```
 
-Resolution order: `{jid}/identity.md` → user's chosen identity (from `/identity` command) → global `identity.md` → hardcoded fallback.
+The `persona.toml` manifest:
 
-**Use cases:**
-- A company runs one agent but wants it to behave as a "coding mentor" in the dev room and a "support agent" in the customer channel
-- A user wants to switch between "creative writing partner" and "technical assistant" depending on the conversation topic
-- A tutoring platform deploys one agent per student, each with a per-JID identity tailored to the student's level
+```toml
+[persona]
+id = "coding-mentor"
+name = "Coding Mentor"
+description = "Patient programming tutor focused on teaching concepts"
+icon = "👨‍💻"                      # Optional, shown in /persona list
+
+[persona.defaults]
+tier = "standard"                  # Default model tier
+skills = ["web_search", "url_fetch"]  # Skills available in this persona
+
+[persona.restrictions]
+# Optional: limit what this persona can do
+allowed_jids = []                  # Empty = all allowed users
+max_tokens_per_message = 4096
+```
+
+#### Slash commands
+
+| Command | Description |
+|---------|-------------|
+| `/persona` | Show current active persona |
+| `/persona list` | List all available personas |
+| `/persona <name>` | Switch to a different persona |
+| `/persona reset` | Return to default persona |
+
+Example interaction:
+
+```
+User: /persona list
+Agent: Available personas:
+       • coding-mentor — Patient programming tutor focused on teaching concepts
+       • support-agent — Professional customer support representative
+       • creative-writer — Imaginative storytelling partner
+       Current: coding-mentor
+
+User: /persona creative-writer
+Agent: Switched to creative-writer persona. I'm now your imaginative storytelling partner!
+```
+
+#### Resolution order
+
+When building the system prompt, files are resolved in this order (first found wins):
+
+1. `{jid}/identity.md` — Per-user override (always takes precedence)
+2. `personas/{active}/identity.md` — Active persona's file
+3. `identity.md` — Global default
+
+This applies to each file type: `identity.md`, `personality.md`, `instructions.md`.
+
+#### Per-user persona persistence
+
+The user's active persona is stored in their JID directory:
+
+```
+data/memory/user@example.com/
+├── active_persona.txt          # Contains "coding-mentor"
+├── history.md
+└── context.md
+```
+
+The choice persists across sessions. Users can have different active personas — Alice might use `coding-mentor` while Bob uses `support-agent`.
+
+#### Per-JID persona restrictions
+
+Operators can restrict which personas are available to specific users or rooms:
+
+```toml
+# In config/agent.toml
+[personas]
+default = "general-assistant"
+
+# Restrict dev room to coding personas only
+[[personas.restrictions]]
+jid = "dev@conference.example.com"
+allowed = ["coding-mentor", "code-reviewer"]
+
+# Give admin access to all personas
+[[personas.restrictions]]
+jid = "admin@example.com"
+allowed = ["*"]
+```
+
+#### Use cases
+
+- **Role switching** — A user switches between "coding mentor" for learning and "code reviewer" for PR feedback
+- **Room-specific personas** — The support room gets `support-agent`, the dev room gets `coding-mentor`
+- **White-label deployments** — Different personas for different clients, all served by one agent
+- **Experimentation** — Try different personality configurations without editing files
+- **User preference** — Some users prefer a terse assistant, others prefer a friendly one — let them choose
+
+#### User-defined personas
+
+Beyond admin-defined global personas, users can create their own custom personas:
+
+| Command | Description |
+|---------|-------------|
+| `/persona create <name>` | Start creating a new persona interactively |
+| `/persona edit <name>` | Modify an existing user persona |
+| `/persona delete <name>` | Remove a user-created persona |
+| `/persona export <name>` | Export persona as shareable TOML |
+| `/persona import` | Import a shared persona |
+
+**Conversational creation** — Creating a persona is interactive:
+
+```
+User: /persona create study-buddy
+Agent: Let's create your "study-buddy" persona. I'll ask a few questions.
+
+       What should this persona's role be?
+User: A patient tutor who helps me study for exams using the Socratic method
+
+Agent: How should it communicate? (tone, style, quirks)
+User: Encouraging but challenging, asks lots of questions, uses analogies
+
+Agent: Any specific instructions or rules?
+User: Never give direct answers, always guide me to discover them myself
+
+Agent: Created persona "study-buddy". Switch to it with /persona study-buddy
+```
+
+**Storage** — User personas are stored in the user's JID directory, isolated from global personas:
+
+```
+data/memory/user@example.com/
+├── personas/
+│   ├── study-buddy/
+│   │   ├── persona.toml
+│   │   ├── identity.md
+│   │   ├── personality.md
+│   │   └── instructions.md
+│   └── my-therapist/
+│       └── ...
+├── active_persona.txt
+└── history.md
+```
+
+**Resolution order** (updated):
+
+1. `{jid}/identity.md` — Per-user file override
+2. `{jid}/personas/{active}/identity.md` — User-created persona
+3. `personas/{active}/identity.md` — Global persona
+4. `identity.md` — Global default
+
+**Sharing personas** — Users can export their personas and share them:
+
+```
+User: /persona export study-buddy
+Agent: Here's your persona configuration:
+       [attached: study-buddy.toml]
+
+       Share this file with others, or ask an admin to add it as a global persona.
+```
+
+Admins can promote popular user personas to global availability:
+
+```toml
+# In config/agent.toml
+[personas]
+allow_user_personas = true         # Enable user-created personas
+max_user_personas = 5              # Limit per user
+allow_sharing = true               # Allow export/import
+```
 
 ### How skills are exposed to the LLM
 
@@ -447,6 +621,7 @@ The agent initiates, not just responds.
 - [ ] Heartbeat / keepalive for long-lived connections
 - [ ] Webhook ingestion — external events trigger agent actions
 - [ ] PubSub subscription — agent reacts to XMPP PubSub events
+- [ ] MCP bridge — leverage existing MCP servers as skills
 
 ### Presence-based proactivity
 
@@ -501,6 +676,110 @@ daily_tokens = 100000
 "claude-sonnet-4-5-20250929" = { input = 3.0, output = 15.0 }
 "claude-haiku-3-5-20241022" = { input = 0.25, output = 1.25 }
 ```
+
+### MCP bridge
+
+The [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) is an open standard for connecting AI assistants to external tools and data sources. Rather than requiring all skills to be rewritten as native Wasm modules, the agent can leverage the existing MCP ecosystem through a bridge skill.
+
+#### How it works
+
+The agent acts as an **MCP client**, spawning and managing MCP servers as child processes:
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    LLM (Claude)                     │
+│         sees: web_search, front_list_inbox,         │
+│               github_create_issue, ...              │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│                  Skill Registry                      │
+├─────────────────┬───────────────┬───────────────────┤
+│  Native Wasm    │   Builtin     │    MCP Bridge     │
+│  (v0.4)         │   (v0.2)      │    (v0.3)         │
+│                 │               │                   │
+│  *.wasm files   │  web_search   │  ┌─────────────┐  │
+│                 │  url_fetch    │  │ MCP Client  │  │
+│                 │               │  └──────┬──────┘  │
+└─────────────────┴───────────────┴─────────┼─────────┘
+                                            │ stdio/SSE
+                              ┌─────────────┴─────────────┐
+                              │      MCP Servers          │
+                              │  (external processes)     │
+                              │                           │
+                              │  front-server  github-srv │
+                              └───────────────────────────┘
+```
+
+1. **Startup** — The agent spawns configured MCP servers as child processes
+2. **Discovery** — Connects via stdio/SSE and discovers available tools via `tools/list`
+3. **Registration** — MCP tools are registered in the SkillRegistry alongside native skills
+4. **Execution** — When the LLM requests an MCP tool, the bridge forwards the call and returns the result
+5. **Lifecycle** — MCP servers are monitored, restarted on crash, and cleanly shut down
+
+#### Configuration
+
+```toml
+[skills.mcp]
+enabled = true
+
+[[skills.mcp.servers]]
+name = "front"
+command = "npx"
+args = ["-y", "@anthropic/mcp-server-front"]
+env = { FRONT_API_KEY = "${FRONT_API_KEY}" }
+# Capability restrictions (validated before forwarding)
+capabilities = ["network:api.frontapp.com:443"]
+
+[[skills.mcp.servers]]
+name = "github"
+command = "npx"
+args = ["-y", "@anthropic/mcp-server-github"]
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
+capabilities = ["network:api.github.com:443"]
+
+[[skills.mcp.servers]]
+name = "filesystem"
+command = "/usr/local/bin/mcp-fs-server"
+args = ["--root", "/home/user/documents"]
+transport = "stdio"
+capabilities = ["filesystem:/home/user/documents:read"]
+```
+
+#### Security considerations
+
+MCP servers are **less sandboxed** than native Wasm skills:
+
+| Aspect | Native Wasm | MCP Bridge |
+|--------|-------------|------------|
+| Memory isolation | Wasm linear memory | Process boundary |
+| Syscall filtering | seccomp whitelist | None (trusts server) |
+| Capability enforcement | Host functions | Declared, not enforced |
+| Crash isolation | Wasm trap | Process restart |
+
+To mitigate risks:
+
+- **Capability declaration required** — MCP servers must declare their capabilities in the config. The bridge logs violations but cannot enforce them at runtime (the MCP server runs unsandboxed).
+- **Process isolation** — Each MCP server runs in a separate process. A crash or hang doesn't affect the agent.
+- **Optional Landlock wrapper** — On Linux, MCP servers can be spawned inside a Landlock sandbox that restricts filesystem access to declared paths.
+- **Audit logging** — All MCP tool calls are logged with parameters and results for compliance.
+
+#### Use cases
+
+- **Migration from OpenClaw** — Bring existing MCP server configurations with minimal changes
+- **Rapid prototyping** — Use community MCP servers before building native skills
+- **Third-party integrations** — Leverage MCP servers for services like Slack, Notion, Linear, etc.
+- **Hybrid architecture** — MCP for convenience, native Wasm for security-critical operations
+
+#### Comparison with native skills
+
+| Consideration | Recommendation |
+|---------------|----------------|
+| Security-critical (financial, PII) | Native Wasm |
+| Rapid integration with existing service | MCP bridge |
+| High-frequency calls | Native Wasm (lower overhead) |
+| Community/third-party maintained | MCP bridge |
+| Custom business logic | Native Wasm |
 
 ---
 
