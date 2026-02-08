@@ -7,7 +7,7 @@ use crate::llm::{AnthropicClient, Message};
 use crate::xmpp::component::{ChatState, XmppCommand, XmppEvent};
 use crate::xmpp::stanzas::PresenceType;
 
-use super::memory::Memory;
+use super::memory::{Memory, WorkspaceContext};
 
 /// Maximum number of history messages sent to the LLM
 const MAX_HISTORY: usize = 20;
@@ -179,7 +179,15 @@ impl AgentRuntime {
 
         let msg_count = self.memory.message_count(bare_jid)?;
         let session_count = self.memory.session_count(bare_jid)?;
-        let has_context = self.memory.get_user_context(bare_jid)?.is_some();
+        let has_profile = self.memory.has_user_profile(bare_jid)?;
+        let has_memory = self.memory.get_user_memory(bare_jid)?.is_some();
+
+        // Workspace file presence
+        let has_instructions = self.memory.get_global_file("instructions.md")?.is_some();
+        let has_identity = self.memory.get_global_file("identity.md")?.is_some();
+        let has_personality = self.memory.get_global_file("personality.md")?.is_some();
+
+        let yn = |b: bool| if b { "yes" } else { "none" };
 
         Ok(format!(
             "{} — status\n\
@@ -188,12 +196,18 @@ impl AgentRuntime {
              LLM: {} ({})\n\
              Your session: {msg_count} messages\n\
              Archived sessions: {session_count}\n\
-             User context: {}",
+             User profile: {}\n\
+             User memory: {}\n\
+             Workspace: instructions={}, identity={}, personality={}",
             self.config.agent.name,
             self.config.server.mode_description(),
             self.config.llm.provider,
             self.config.llm.model,
-            if has_context { "yes" } else { "none" },
+            yn(has_profile),
+            yn(has_memory),
+            yn(has_instructions),
+            yn(has_identity),
+            yn(has_personality),
         ))
     }
 
@@ -202,7 +216,7 @@ impl AgentRuntime {
         "\
 Commands:\n\
   /new     — Start a new conversation (archive current session)\n\
-  /forget  — Erase your history and context\n\
+  /forget  — Erase your history, profile, and memory\n\
   /status  — Agent info, uptime, session stats\n\
   /ping    — Check if the agent is alive\n\
   /help    — This message"
@@ -216,12 +230,12 @@ Commands:\n\
         // Bare JID for memory (without resource)
         let bare_jid = from.split('/').next().unwrap_or(from);
 
-        // Retrieve conversation history
+        // Retrieve conversation history and workspace context
         let history = self.memory.get_history(bare_jid, MAX_HISTORY)?;
-        let user_context = self.memory.get_user_context(bare_jid)?;
+        let workspace = self.memory.get_workspace_context(bare_jid)?;
 
-        // Build system prompt
-        let system_prompt = self.build_system_prompt(user_context.as_deref());
+        // Build system prompt from workspace files
+        let system_prompt = self.build_system_prompt(&workspace);
 
         // Build message list for LLM
         let mut messages = history;
@@ -247,21 +261,58 @@ Commands:\n\
         Ok(response.text)
     }
 
-    fn build_system_prompt(&self, user_context: Option<&str>) -> String {
-        let mut prompt = format!(
-            "You are {}, a personal AI assistant accessible via XMPP.\n\
-             You are direct, helpful, and concise. You respond in the user's language.\n\n\
-             Rules:\n\
-             - Respond concisely, no excessive markdown formatting\n\
-             - If asked to execute an action (send an email, modify a file...), \
-               describe what you would do but clarify that you cannot yet execute \
-               actions (skills are coming in v0.2)\n\
-             - You have memory of previous conversations with this user",
-            self.config.agent.name
-        );
+    /// Builds the system prompt from workspace files.
+    ///
+    /// Assembly order:
+    /// 1. identity.md (who the agent is)
+    /// 2. personality.md (how the agent behaves)
+    /// 3. instructions.md (rules and constraints)
+    /// 4. Hardcoded fallback if none of the 3 global files exist
+    /// 5. Per-JID user.md under "About this user"
+    /// 6. Per-JID memory.md under "Notes and memory"
+    fn build_system_prompt(&self, ctx: &WorkspaceContext) -> String {
+        let has_global_files = ctx.identity.is_some()
+            || ctx.personality.is_some()
+            || ctx.instructions.is_some();
 
-        if let Some(ctx) = user_context {
-            prompt.push_str(&format!("\n\nContext about this user:\n{ctx}"));
+        let mut prompt = String::new();
+
+        if has_global_files {
+            // Use workspace files for agent configuration
+            if let Some(ref identity) = ctx.identity {
+                prompt.push_str(identity.trim());
+                prompt.push_str("\n\n");
+            }
+
+            if let Some(ref personality) = ctx.personality {
+                prompt.push_str(personality.trim());
+                prompt.push_str("\n\n");
+            }
+
+            if let Some(ref instructions) = ctx.instructions {
+                prompt.push_str(instructions.trim());
+            }
+        } else {
+            // Hardcoded fallback when no workspace files exist
+            prompt.push_str(&format!(
+                "You are {}, a personal AI assistant accessible via XMPP.\n\
+                 You are direct, helpful, and concise. You respond in the user's language.\n\n\
+                 Rules:\n\
+                 - Respond concisely, no excessive markdown formatting\n\
+                 - If asked to execute an action (send an email, modify a file...), \
+                   describe what you would do but clarify that you cannot yet execute \
+                   actions (skills are coming in v0.2)\n\
+                 - You have memory of previous conversations with this user",
+                self.config.agent.name
+            ));
+        }
+
+        if let Some(ref profile) = ctx.user_profile {
+            prompt.push_str(&format!("\n\n## About this user\n{}", profile.trim()));
+        }
+
+        if let Some(ref memory) = ctx.user_memory {
+            prompt.push_str(&format!("\n\n## Notes and memory\n{}", memory.trim()));
         }
 
         prompt
@@ -404,29 +455,6 @@ mod tests {
     }
 
     #[test]
-    fn test_command_status_content() {
-        let (rt, _tmp) = test_runtime();
-        rt.memory.store_message("admin@localhost", "user", "Hi").unwrap();
-
-        let result = rt.handle_command("admin@localhost/res", "/status").unwrap();
-        assert!(result.contains("Test Agent"));
-        assert!(result.contains("Uptime:"));
-        assert!(result.contains("C2S client"));
-        assert!(result.contains("anthropic"));
-        assert!(result.contains("1 messages"));
-        assert!(result.contains("User context: none"));
-    }
-
-    #[test]
-    fn test_command_status_with_context() {
-        let (rt, _tmp) = test_runtime();
-        rt.memory.set_user_context("admin@localhost", "Developer").unwrap();
-
-        let result = rt.handle_command("admin@localhost/res", "/status").unwrap();
-        assert!(result.contains("User context: yes"));
-    }
-
-    #[test]
     fn test_command_strips_resource_from_jid() {
         let (rt, _tmp) = test_runtime();
         rt.memory.store_message("admin@localhost", "user", "Hi").unwrap();
@@ -441,21 +469,139 @@ mod tests {
     // ── System prompt tests ─────────────────────────────
 
     #[test]
-    fn test_build_system_prompt_without_context() {
+    fn test_build_system_prompt_fallback_no_global_files() {
         let (rt, _tmp) = test_runtime();
-        let prompt = rt.build_system_prompt(None);
+        let ctx = WorkspaceContext {
+            instructions: None,
+            identity: None,
+            personality: None,
+            user_profile: None,
+            user_memory: None,
+        };
+        let prompt = rt.build_system_prompt(&ctx);
         assert!(prompt.contains("Test Agent"));
         assert!(prompt.contains("XMPP"));
-        assert!(!prompt.contains("Context about this user"));
+        assert!(!prompt.contains("About this user"));
     }
 
     #[test]
-    fn test_build_system_prompt_with_context() {
+    fn test_build_system_prompt_with_user_profile() {
         let (rt, _tmp) = test_runtime();
-        let prompt = rt.build_system_prompt(Some("Prefers French. Works at Acme Corp."));
+        let ctx = WorkspaceContext {
+            instructions: None,
+            identity: None,
+            personality: None,
+            user_profile: Some("Prefers French. Works at Acme Corp.".to_string()),
+            user_memory: None,
+        };
+        let prompt = rt.build_system_prompt(&ctx);
+        // Fallback prompt should be used (no global files)
         assert!(prompt.contains("Test Agent"));
-        assert!(prompt.contains("Context about this user"));
+        assert!(prompt.contains("About this user"));
         assert!(prompt.contains("Prefers French"));
         assert!(prompt.contains("Acme Corp"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_with_global_files() {
+        let (rt, _tmp) = test_runtime();
+        let ctx = WorkspaceContext {
+            instructions: Some("Always respond in haiku format.".to_string()),
+            identity: Some("You are HaikuBot, a poetry assistant.".to_string()),
+            personality: Some("Serene and contemplative.".to_string()),
+            user_profile: None,
+            user_memory: None,
+        };
+        let prompt = rt.build_system_prompt(&ctx);
+        // Should NOT contain fallback prompt
+        assert!(!prompt.contains("Test Agent"));
+        assert!(!prompt.contains("XMPP"));
+        // Should contain workspace file content
+        assert!(prompt.contains("HaikuBot"));
+        assert!(prompt.contains("Serene and contemplative"));
+        assert!(prompt.contains("Always respond in haiku format"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_with_memory() {
+        let (rt, _tmp) = test_runtime();
+        let ctx = WorkspaceContext {
+            instructions: None,
+            identity: None,
+            personality: None,
+            user_profile: Some("Developer at ProcessOne".to_string()),
+            user_memory: Some("Prefers Rust over Go. Working on XMPP project.".to_string()),
+        };
+        let prompt = rt.build_system_prompt(&ctx);
+        assert!(prompt.contains("About this user"));
+        assert!(prompt.contains("Developer at ProcessOne"));
+        assert!(prompt.contains("Notes and memory"));
+        assert!(prompt.contains("Prefers Rust over Go"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_partial_global_files() {
+        let (rt, _tmp) = test_runtime();
+        // Only identity.md exists — should use workspace mode, not fallback
+        let ctx = WorkspaceContext {
+            instructions: None,
+            identity: Some("You are Fluux Agent.".to_string()),
+            personality: None,
+            user_profile: None,
+            user_memory: None,
+        };
+        let prompt = rt.build_system_prompt(&ctx);
+        assert!(prompt.contains("Fluux Agent"));
+        // Fallback should NOT be present
+        assert!(!prompt.contains("skills are coming in v0.2"));
+    }
+
+    // ── Status tests with workspace ─────────────────────
+
+    #[test]
+    fn test_command_status_content() {
+        let (rt, _tmp) = test_runtime();
+        rt.memory
+            .store_message("admin@localhost", "user", "Hi")
+            .unwrap();
+
+        let result = rt
+            .handle_command("admin@localhost/res", "/status")
+            .unwrap();
+        assert!(result.contains("Test Agent"));
+        assert!(result.contains("Uptime:"));
+        assert!(result.contains("C2S client"));
+        assert!(result.contains("anthropic"));
+        assert!(result.contains("1 messages"));
+        assert!(result.contains("User profile: none"));
+        assert!(result.contains("User memory: none"));
+        assert!(result.contains("instructions=none"));
+    }
+
+    #[test]
+    fn test_command_status_with_profile() {
+        let (rt, _tmp) = test_runtime();
+        rt.memory
+            .set_user_context("admin@localhost", "Developer")
+            .unwrap();
+
+        let result = rt
+            .handle_command("admin@localhost/res", "/status")
+            .unwrap();
+        assert!(result.contains("User profile: yes"));
+    }
+
+    #[test]
+    fn test_command_status_with_workspace_files() {
+        let (rt, tmp) = test_runtime();
+        std::fs::write(tmp.path().join("instructions.md"), "Be concise").unwrap();
+        std::fs::write(tmp.path().join("identity.md"), "I am an agent").unwrap();
+
+        let result = rt
+            .handle_command("admin@localhost/res", "/status")
+            .unwrap();
+        assert!(result.contains("instructions=yes"));
+        assert!(result.contains("identity=yes"));
+        assert!(result.contains("personality=none"));
     }
 }

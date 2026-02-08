@@ -172,7 +172,7 @@ backend = "markdown"
 path = "./data/memory"
 ```
 
-Memory is stored as human-readable markdown files — one directory per user with `history.md` and `context.md`. This makes agent memory inspectable, editable, and git-friendly.
+Memory is stored as human-readable markdown files — workspace files for global agent configuration and per-JID directories for isolated user data. This makes agent memory inspectable, editable, and git-friendly. Admins can customize agent behavior by creating `instructions.md`, `identity.md`, and `personality.md` in the memory root directory.
 
 ## Commands
 
@@ -181,7 +181,7 @@ Messages starting with `/` are intercepted by the runtime and never reach the LL
 | Command | Description |
 |---------|-------------|
 | `/new` or `/reset` | Archive the current conversation and start a fresh session |
-| `/forget` | Erase your history and user context (archived sessions are preserved) |
+| `/forget` | Erase your history, profile, and memory (archived sessions are preserved) |
 | `/status` | Agent uptime, connection mode, LLM model, session stats |
 | `/ping` | Check if the agent is alive |
 | `/help` | List available commands |
@@ -191,19 +191,26 @@ Messages starting with `/` are intercepted by the runtime and never reach the LL
 Each user has a current conversation session (`history.md`) and optionally archived past sessions. This prevents context from growing unboundedly and lets users start fresh when changing topics.
 
 - **`/new`** archives the current session to `sessions/{YYYYMMDD-HHMMSS}.md` and clears the LLM context.
-- **`/forget`** erases the current history and user context but preserves archived sessions.
+- **`/forget`** erases the current history, user profile (`user.md`), and memory (`memory.md`) but preserves archived sessions.
 - **`/status`** shows the number of messages in the current session and how many sessions have been archived.
 
-Memory layout per user:
+Memory layout:
 
 ```
-data/memory/{jid}/
-├── history.md                  # Current session
-├── context.md                  # What the agent knows about the user
-└── sessions/
-    ├── 20250601-143022.md      # Archived session
-    └── 20250602-091500.md      # Another archived session
+data/memory/
+├── instructions.md              # Global: agent behavior rules
+├── identity.md                  # Global: agent name, personality, background
+├── personality.md               # Global: tone, style, quirks
+├── {jid}/
+│   ├── user.md                  # What the agent knows about this user
+│   ├── memory.md                # Long-term notes about this user
+│   ├── history.md               # Current session
+│   └── sessions/
+│       ├── 20250601-143022.md   # Archived session
+│       └── 20250602-091500.md   # Another archived session
 ```
+
+Global workspace files (`instructions.md`, `identity.md`, `personality.md`) are shared across all users and let admins customize the agent without touching code. When no workspace files exist, a built-in default prompt is used. Per-JID directories are strictly isolated — each user (or room) has their own `user.md`, `memory.md`, and conversation history.
 
 ## Project Structure
 
@@ -233,7 +240,7 @@ fluux-agent/
 │   │       └── web_search.rs   # Example skill: web search
 │   └── sandbox/
 │       └── mod.rs              # Stub for v0.4 (Wasm + Landlock)
-├── data/memory/                # Agent memory (one dir per user JID)
+├── data/memory/                # Agent memory (workspace files + per-JID dirs)
 ├── config/
 │   └── agent.example.toml
 ├── Cargo.toml
