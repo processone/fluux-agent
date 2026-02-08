@@ -1044,7 +1044,7 @@ Support receiving and sending files via XMPP:
 
 ### Team memory via MUC (Multi-User Chat)
 
-Today the agent has per-user memory (1:1 conversations). For team use, the agent could join XMPP chat rooms (MUC, XEP-0045) and maintain **shared team memory** alongside individual user memory:
+The agent supports joining XMPP chat rooms (MUC, XEP-0045) since v0.1. For enhanced team collaboration, it can maintain **shared team memory** alongside individual user memory:
 
 - **Personal memory** — `{jid}/history.md` + `{jid}/context.md` — what the agent knows about each individual user. Private, per-user.
 - **Team memory** — `{room_jid}/history.md` + `{room_jid}/context.md` — shared context from group conversations. The agent participates in the room, observes discussions, and builds team-level context (project names, decisions, recurring topics).
