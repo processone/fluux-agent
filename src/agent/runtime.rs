@@ -1,11 +1,14 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::agent::files::{file_to_content_block, FileDownloader};
 use crate::config::Config;
-use crate::llm::{AnthropicClient, Message};
+use crate::llm::{AnthropicClient, InputContentBlock, Message, MessageContent};
 use crate::xmpp::component::{ChatState, DisconnectReason, XmppCommand, XmppEvent};
-use crate::xmpp::stanzas::{self, MessageType, PresenceType};
+use crate::xmpp::stanzas::{self, MessageType, OobData, PresenceType};
 
 use super::memory::{Memory, WorkspaceContext};
 
@@ -19,16 +22,23 @@ const MAX_HISTORY: usize = 20;
 pub struct AgentRuntime {
     config: Config,
     llm: AnthropicClient,
-    memory: Memory,
+    memory: Arc<Memory>,
+    file_downloader: Arc<FileDownloader>,
     start_time: std::time::Instant,
 }
 
 impl AgentRuntime {
-    pub fn new(config: Config, llm: AnthropicClient, memory: Memory) -> Self {
+    pub fn new(
+        config: Config,
+        llm: AnthropicClient,
+        memory: Arc<Memory>,
+        file_downloader: Arc<FileDownloader>,
+    ) -> Self {
         Self {
             config,
             llm,
             memory,
+            file_downloader,
             start_time: std::time::Instant::now(),
         }
     }
@@ -83,10 +93,11 @@ impl AgentRuntime {
                         // Store ALL room messages to history (for full context)
                         // Use sender's nick in the header: "### user (alice)"
                         let sender_label = format!("{sender_nick}@muc");
+                        let store_body = build_history_text(&msg.body, &msg.oob);
                         if let Err(e) = self.memory.store_message_with_jid(
                             bare_from,
                             "user",
-                            &msg.body,
+                            &store_body,
                             Some(&sender_label),
                         ) {
                             error!("Failed to store MUC message: {e}");
@@ -173,9 +184,83 @@ impl AgentRuntime {
                         info!("Processing message from {}: {}", msg.from, msg.body);
 
                         // Slash commands are intercepted before the LLM
-                        let response = if msg.body.starts_with('/') {
-                            self.handle_command(&msg.from, &msg.body)
+                        if msg.body.starts_with('/') {
+                            let response = self.handle_command(&msg.from, &msg.body);
+                            match response {
+                                Ok(text) => {
+                                    let _ = cmd_tx
+                                        .send(XmppCommand::SendMessage {
+                                            to: msg.from.clone(),
+                                            body: text,
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    error!("Error processing command: {e}");
+                                    let _ = cmd_tx
+                                        .send(XmppCommand::SendMessage {
+                                            to: msg.from.clone(),
+                                            body: format!("Sorry, an error occurred: {e}"),
+                                        })
+                                        .await;
+                                }
+                            }
+                        } else if !msg.oob.is_empty() {
+                            // ── Message with file attachments ──────────
+                            // Download + LLM call in a spawned task to avoid
+                            // blocking the event loop on file I/O.
+                            let _ = cmd_tx
+                                .send(XmppCommand::SendChatState {
+                                    to: msg.from.clone(),
+                                    state: ChatState::Composing,
+                                    msg_type: "chat".to_string(),
+                                })
+                                .await;
+
+                            let downloader = Arc::clone(&self.file_downloader);
+                            let memory = Arc::clone(&self.memory);
+                            let llm = self.llm.clone();
+                            let config = self.config.clone();
+                            let cmd_tx_clone = cmd_tx.clone();
+                            let from = msg.from.clone();
+                            let body = msg.body.clone();
+                            let oob_list = msg.oob.clone();
+
+                            tokio::spawn(async move {
+                                let result = handle_message_with_attachments(
+                                    &from, &body, &oob_list,
+                                    &downloader, &memory, &llm, &config,
+                                ).await;
+
+                                match result {
+                                    Ok(text) => {
+                                        let _ = cmd_tx_clone
+                                            .send(XmppCommand::SendMessage {
+                                                to: from,
+                                                body: text,
+                                            })
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        error!("Error processing attachment message: {e}");
+                                        let _ = cmd_tx_clone
+                                            .send(XmppCommand::SendChatState {
+                                                to: from.clone(),
+                                                state: ChatState::Paused,
+                                                msg_type: "chat".to_string(),
+                                            })
+                                            .await;
+                                        let _ = cmd_tx_clone
+                                            .send(XmppCommand::SendMessage {
+                                                to: from,
+                                                body: format!("Sorry, an error occurred: {e}"),
+                                            })
+                                            .await;
+                                    }
+                                }
+                            });
                         } else {
+                            // ── Regular text message ───────────────────
                             // Send <composing/> before the LLM call
                             let _ = cmd_tx
                                 .send(XmppCommand::SendChatState {
@@ -185,33 +270,33 @@ impl AgentRuntime {
                                 })
                                 .await;
 
-                            self.handle_message(&msg.from, &msg.body).await
-                        };
+                            let response = self.handle_message(&msg.from, &msg.body).await;
 
-                        match response {
-                            Ok(text) => {
-                                let _ = cmd_tx
-                                    .send(XmppCommand::SendMessage {
-                                        to: msg.from.clone(),
-                                        body: text,
-                                    })
-                                    .await;
-                            }
-                            Err(e) => {
-                                error!("Error processing message: {e}");
-                                let _ = cmd_tx
-                                    .send(XmppCommand::SendChatState {
-                                        to: msg.from.clone(),
-                                        state: ChatState::Paused,
-                                        msg_type: "chat".to_string(),
-                                    })
-                                    .await;
-                                let _ = cmd_tx
-                                    .send(XmppCommand::SendMessage {
-                                        to: msg.from.clone(),
-                                        body: format!("Sorry, an error occurred: {e}"),
-                                    })
-                                    .await;
+                            match response {
+                                Ok(text) => {
+                                    let _ = cmd_tx
+                                        .send(XmppCommand::SendMessage {
+                                            to: msg.from.clone(),
+                                            body: text,
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    error!("Error processing message: {e}");
+                                    let _ = cmd_tx
+                                        .send(XmppCommand::SendChatState {
+                                            to: msg.from.clone(),
+                                            state: ChatState::Paused,
+                                            msg_type: "chat".to_string(),
+                                        })
+                                        .await;
+                                    let _ = cmd_tx
+                                        .send(XmppCommand::SendMessage {
+                                            to: msg.from.clone(),
+                                            body: format!("Sorry, an error occurred: {e}"),
+                                        })
+                                        .await;
+                                }
                             }
                         }
                     }
@@ -328,19 +413,26 @@ impl AgentRuntime {
 
         let is_room = self.config.find_room(bare_jid).is_some();
 
+        let file_count = self.memory.file_count(bare_jid)?;
+        let file_info = if file_count > 0 {
+            format!("\nFiles: {file_count}")
+        } else {
+            String::new()
+        };
+
         // Context-specific section: room info vs. user info
         let context_info = if is_room {
             format!(
                 "Room: {bare_jid}\n\
                  Room messages: {msg_count}\n\
-                 Archived sessions: {session_count}"
+                 Archived sessions: {session_count}{file_info}"
             )
         } else {
             let has_profile = self.memory.has_user_profile(bare_jid)?;
             let has_memory = self.memory.get_user_memory(bare_jid)?.is_some();
             format!(
                 "Your session: {msg_count} messages\n\
-                 Archived sessions: {session_count}\n\
+                 Archived sessions: {session_count}{file_info}\n\
                  User profile: {}\n\
                  User memory: {}",
                 yn(has_profile),
@@ -408,7 +500,7 @@ Commands:\n\
         let mut messages = history;
         messages.push(Message {
             role: "user".to_string(),
-            content: body.to_string(),
+            content: body.to_string().into(),
         });
 
         // Call LLM
@@ -464,52 +556,191 @@ Commands:\n\
     /// 5. Per-JID user.md under "About this user"
     /// 6. Per-JID memory.md under "Notes and memory"
     fn build_system_prompt(&self, ctx: &WorkspaceContext) -> String {
-        let has_global_files = ctx.identity.is_some()
-            || ctx.personality.is_some()
-            || ctx.instructions.is_some();
-
-        let mut prompt = String::new();
-
-        if has_global_files {
-            // Use workspace files for agent configuration
-            if let Some(ref identity) = ctx.identity {
-                prompt.push_str(identity.trim());
-                prompt.push_str("\n\n");
-            }
-
-            if let Some(ref personality) = ctx.personality {
-                prompt.push_str(personality.trim());
-                prompt.push_str("\n\n");
-            }
-
-            if let Some(ref instructions) = ctx.instructions {
-                prompt.push_str(instructions.trim());
-            }
-        } else {
-            // Hardcoded fallback when no workspace files exist
-            prompt.push_str(&format!(
-                "You are {}, a personal AI assistant accessible via XMPP.\n\
-                 You are direct, helpful, and concise. You respond in the user's language.\n\n\
-                 Rules:\n\
-                 - Respond concisely, no excessive markdown formatting\n\
-                 - If asked to execute an action (send an email, modify a file...), \
-                   describe what you would do but clarify that you cannot yet execute \
-                   actions (skills are coming in v0.2)\n\
-                 - You have memory of previous conversations with this user",
-                self.config.agent.name
-            ));
-        }
-
-        if let Some(ref profile) = ctx.user_profile {
-            prompt.push_str(&format!("\n\n## About this user\n{}", profile.trim()));
-        }
-
-        if let Some(ref memory) = ctx.user_memory {
-            prompt.push_str(&format!("\n\n## Notes and memory\n{}", memory.trim()));
-        }
-
-        prompt
+        build_system_prompt_static(&self.config.agent.name, ctx)
     }
+}
+
+// ── Attachment handling (runs in spawned tasks) ──────────
+
+/// Builds the text stored in conversation history for a message that may have attachments.
+///
+/// When OOB files are present, prepends `[Attached: filename.jpg]` tags so the LLM
+/// has context about what was discussed, without embedding base64 data in history.
+fn build_history_text(body: &str, oob_list: &[OobData]) -> String {
+    if oob_list.is_empty() {
+        return body.to_string();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    for oob in oob_list {
+        let filename = oob.url.rsplit('/').next().unwrap_or("file");
+        parts.push(format!("[Attached: {filename}]"));
+    }
+    if !body.is_empty() {
+        parts.push(body.to_string());
+    }
+    parts.join("\n")
+}
+
+/// Handles a 1:1 message with OOB file attachments.
+///
+/// Downloads each file, converts supported types to Anthropic API content blocks,
+/// and sends a multi-modal message to the LLM. Runs in a spawned task.
+async fn handle_message_with_attachments(
+    from: &str,
+    body: &str,
+    oob_list: &[OobData],
+    downloader: &FileDownloader,
+    memory: &Memory,
+    llm: &AnthropicClient,
+    config: &Config,
+) -> Result<String> {
+    let bare_jid = stanzas::bare_jid(from);
+    let files_dir = memory.files_dir(bare_jid)?;
+
+    info!(
+        "Processing {} attachment(s) from {bare_jid}",
+        oob_list.len()
+    );
+
+    // Download files sequentially (semaphore inside FileDownloader handles concurrency)
+    let mut content_blocks: Vec<InputContentBlock> = Vec::new();
+    let mut attachment_labels: Vec<String> = Vec::new();
+
+    for (i, oob) in oob_list.iter().enumerate() {
+        debug!("Downloading attachment {}/{}: {}", i + 1, oob_list.len(), oob.url);
+        match downloader.download(&oob.url, &files_dir).await {
+            Ok(file) => {
+                info!(
+                    "Downloaded {} ({}, {})",
+                    file.filename, file.mime_type, file.human_size()
+                );
+                attachment_labels.push(format!(
+                    "[Attached: {} ({}, {})]",
+                    file.filename,
+                    file.mime_type,
+                    file.human_size()
+                ));
+                match file_to_content_block(&file).await {
+                    Ok(Some(block)) => content_blocks.push(block),
+                    Ok(None) => {
+                        // Unsupported type — add text note
+                        content_blocks.push(InputContentBlock::Text {
+                            text: format!(
+                                "[File received: {} ({}) — unsupported type, cannot analyze]",
+                                file.filename, file.mime_type
+                            ),
+                        });
+                    }
+                    Err(e) => {
+                        warn!("Failed to encode file {}: {e}", file.filename);
+                        content_blocks.push(InputContentBlock::Text {
+                            text: format!(
+                                "[File received: {} — encoding error]",
+                                file.filename
+                            ),
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to download {}: {e}", oob.url);
+                content_blocks.push(InputContentBlock::Text {
+                    text: format!("[File download failed: {e}]"),
+                });
+                attachment_labels.push("[Attached: download failed]".to_string());
+            }
+        }
+    }
+
+    // Add text body if present
+    if !body.is_empty() {
+        content_blocks.push(InputContentBlock::Text {
+            text: body.to_string(),
+        });
+    }
+
+    // Build the multi-modal message
+    let history = memory.get_history(bare_jid, MAX_HISTORY)?;
+    let workspace = memory.get_workspace_context(bare_jid)?;
+    let system_prompt = build_system_prompt_static(&config.agent.name, &workspace);
+
+    let mut messages = history;
+    messages.push(Message {
+        role: "user".to_string(),
+        content: MessageContent::Blocks(content_blocks),
+    });
+
+    debug!("Calling LLM with {} messages (including attachment)", messages.len());
+
+    // Call LLM
+    let response = llm.complete(&system_prompt, &messages).await?;
+
+    // Store messages in history (text description, not base64)
+    let mut history_text = attachment_labels.join("\n");
+    if !body.is_empty() {
+        if !history_text.is_empty() {
+            history_text.push('\n');
+        }
+        history_text.push_str(body);
+    }
+    memory.store_message(bare_jid, "user", &history_text)?;
+    memory.store_message(bare_jid, "assistant", &response.text)?;
+
+    info!(
+        "Attachment response to {bare_jid}: {} chars ({} tokens used)",
+        response.text.len(),
+        response.input_tokens + response.output_tokens
+    );
+
+    Ok(response.text)
+}
+
+/// Static version of build_system_prompt for use from spawned tasks.
+/// (Cannot borrow `self` in a spawned task, so we extract the logic.)
+fn build_system_prompt_static(agent_name: &str, ctx: &WorkspaceContext) -> String {
+    let has_global_files = ctx.identity.is_some()
+        || ctx.personality.is_some()
+        || ctx.instructions.is_some();
+
+    let mut prompt = String::new();
+
+    if has_global_files {
+        if let Some(ref identity) = ctx.identity {
+            prompt.push_str(identity.trim());
+            prompt.push_str("\n\n");
+        }
+
+        if let Some(ref personality) = ctx.personality {
+            prompt.push_str(personality.trim());
+            prompt.push_str("\n\n");
+        }
+
+        if let Some(ref instructions) = ctx.instructions {
+            prompt.push_str(instructions.trim());
+        }
+    } else {
+        prompt.push_str(&format!(
+            "You are {agent_name}, a personal AI assistant accessible via XMPP.\n\
+             You are direct, helpful, and concise. You respond in the user's language.\n\n\
+             Rules:\n\
+             - Respond concisely, no excessive markdown formatting\n\
+             - If asked to execute an action (send an email, modify a file...), \
+               describe what you would do but clarify that you cannot yet execute \
+               actions (skills are coming in v0.2)\n\
+             - You have memory of previous conversations with this user"
+        ));
+    }
+
+    if let Some(ref profile) = ctx.user_profile {
+        prompt.push_str(&format!("\n\n## About this user\n{}", profile.trim()));
+    }
+
+    if let Some(ref memory) = ctx.user_memory {
+        prompt.push_str(&format!("\n\n## Notes and memory\n{}", memory.trim()));
+    }
+
+    prompt
 }
 
 // ── MUC mention helpers ──────────────────────────────────
@@ -594,8 +825,9 @@ mod tests {
         };
 
         let llm = AnthropicClient::new(config.llm.clone());
-        let memory = Memory::open(tmp.path()).unwrap();
-        let runtime = AgentRuntime::new(config, llm, memory);
+        let memory = Arc::new(Memory::open(tmp.path()).unwrap());
+        let file_downloader = Arc::new(FileDownloader::new(3));
+        let runtime = AgentRuntime::new(config, llm, memory, file_downloader);
         (runtime, tmp)
     }
 
@@ -978,5 +1210,72 @@ mod tests {
 
         let result = rt.handle_command("admin@localhost", "/status").unwrap();
         assert!(result.contains("Allowed domains: localhost, partner.org"));
+    }
+
+    // ── build_history_text tests ─────────────────────────
+
+    #[test]
+    fn test_build_history_text_no_oob() {
+        let text = build_history_text("Hello!", &[]);
+        assert_eq!(text, "Hello!");
+    }
+
+    #[test]
+    fn test_build_history_text_oob_with_body() {
+        let oob = vec![OobData {
+            url: "https://upload.example.com/abc/photo.jpg".to_string(),
+            desc: None,
+        }];
+        let text = build_history_text("What is this?", &oob);
+        assert_eq!(text, "[Attached: photo.jpg]\nWhat is this?");
+    }
+
+    #[test]
+    fn test_build_history_text_oob_no_body() {
+        let oob = vec![OobData {
+            url: "https://upload.example.com/abc/photo.jpg".to_string(),
+            desc: None,
+        }];
+        let text = build_history_text("", &oob);
+        assert_eq!(text, "[Attached: photo.jpg]");
+    }
+
+    #[test]
+    fn test_build_history_text_multiple_oob() {
+        let oob = vec![
+            OobData {
+                url: "https://upload.example.com/a.jpg".to_string(),
+                desc: None,
+            },
+            OobData {
+                url: "https://upload.example.com/b.pdf".to_string(),
+                desc: None,
+            },
+        ];
+        let text = build_history_text("Check these", &oob);
+        assert_eq!(
+            text,
+            "[Attached: a.jpg]\n[Attached: b.pdf]\nCheck these"
+        );
+    }
+
+    // ── Status with files test ──────────────────────────
+
+    #[test]
+    fn test_command_status_with_files() {
+        let (rt, tmp) = test_runtime();
+        let files_dir = rt.memory.files_dir("admin@localhost").unwrap();
+        std::fs::write(files_dir.join("abc_photo.jpg"), b"fake").unwrap();
+
+        let result = rt.handle_command("admin@localhost", "/status").unwrap();
+        assert!(result.contains("Files: 1"));
+    }
+
+    #[test]
+    fn test_command_status_no_files_hides_line() {
+        let (rt, _tmp) = test_runtime();
+        let result = rt.handle_command("admin@localhost", "/status").unwrap();
+        // When there are no files, the "Files:" line should not appear
+        assert!(!result.contains("Files:"));
     }
 }

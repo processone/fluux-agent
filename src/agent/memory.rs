@@ -342,6 +342,19 @@ impl Memory {
             erased.push("memory".to_string());
         }
 
+        // Erase downloaded files
+        let files_dir = user_dir.join("files");
+        if files_dir.exists() {
+            let file_count = fs::read_dir(&files_dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .count();
+            if file_count > 0 {
+                fs::remove_dir_all(&files_dir)?;
+                erased.push(format!("{file_count} files"));
+            }
+        }
+
         if erased.is_empty() {
             Ok("No active memory to erase (archived sessions preserved).".to_string())
         } else {
@@ -350,6 +363,29 @@ impl Memory {
                 erased.join(", ")
             ))
         }
+    }
+
+    // ── File storage ──────────────────────────────────────
+
+    /// Returns the files directory for a JID, creating it if needed.
+    /// Layout: `{base_path}/{jid}/files/`
+    pub fn files_dir(&self, jid: &str) -> Result<PathBuf> {
+        let dir = self.base_path.join(jid).join("files");
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// Number of downloaded files stored for a JID
+    pub fn file_count(&self, jid: &str) -> Result<usize> {
+        let dir = self.base_path.join(jid).join("files");
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let count = fs::read_dir(&dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .count();
+        Ok(count)
     }
 
     /// Total number of messages in the current session for a JID
@@ -408,7 +444,7 @@ fn parse_history(content: &str) -> Vec<Message> {
                 if !text.is_empty() {
                     messages.push(Message {
                         role: r,
-                        content: text,
+                        content: text.into(),
                     });
                 }
             }
@@ -428,7 +464,7 @@ fn parse_history(content: &str) -> Vec<Message> {
         if !text.is_empty() {
             messages.push(Message {
                 role: r,
-                content: text,
+                content: text.into(),
             });
         }
     }
@@ -1199,6 +1235,56 @@ New message with JID
         assert_eq!(ctx.instructions.unwrap(), "Lab-specific rules");
         assert!(ctx.identity.is_none());
         assert!(ctx.personality.is_none());
+    }
+
+    // ── File storage tests ─────────────────────────────────
+
+    #[test]
+    fn test_files_dir_creates_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        let files_dir = memory.files_dir("user@test").unwrap();
+        assert!(files_dir.exists());
+        assert!(files_dir.ends_with("user@test/files"));
+    }
+
+    #[test]
+    fn test_file_count_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        assert_eq!(memory.file_count("user@test").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_file_count_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        let files_dir = memory.files_dir("user@test").unwrap();
+        fs::write(files_dir.join("abc_photo.jpg"), b"fake image").unwrap();
+        fs::write(files_dir.join("def_doc.pdf"), b"fake pdf").unwrap();
+
+        assert_eq!(memory.file_count("user@test").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_forget_erases_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        // Store some messages and files
+        memory.store_message("user@test", "user", "Hello!").unwrap();
+        let files_dir = memory.files_dir("user@test").unwrap();
+        fs::write(files_dir.join("abc_photo.jpg"), b"fake image").unwrap();
+        fs::write(files_dir.join("def_doc.pdf"), b"fake pdf").unwrap();
+
+        let result = memory.forget("user@test").unwrap();
+        assert!(result.contains("2 files"));
+
+        // Files directory should be gone
+        assert_eq!(memory.file_count("user@test").unwrap(), 0);
     }
 
     #[test]

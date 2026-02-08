@@ -8,10 +8,11 @@ Fluux Agent implements the following XMPP standards:
 
 Core XMPP protocol — XML streams, stanza routing, error handling.
 
-**Implementation:** Stream establishment, stanza parsing, error condition handling (§4.9.3).
+**Implementation:** Stream establishment, stanza parsing (quick-xml event-based `StanzaParser`), error condition handling (§4.9.3).
 
 **References:**
-- `src/xmpp/stanzas.rs:487` — stream error conditions
+- `src/xmpp/stanzas.rs:724` — stream error conditions (25 RFC 6120 conditions)
+- `src/xmpp/stanzas.rs:446` — `StanzaParser` (event-based XML stream parser)
 - `src/xmpp/component.rs` — stream management
 
 ---
@@ -23,7 +24,8 @@ Instant messaging, presence subscriptions, and roster management.
 **Implementation:** Message and presence stanza handling, roster operations.
 
 **References:**
-- `src/xmpp/stanzas.rs:308` — roster management
+- `src/xmpp/stanzas.rs:327` — roster management
+- `src/xmpp/stanzas.rs:273` — presence types and subscription handling
 - `src/agent/runtime.rs` — message and presence processing
 
 ---
@@ -82,9 +84,25 @@ Chat state indicators for typing awareness.
 **Implementation:** Both component (XEP-0114) and C2S client modes.
 
 **References:**
-- `src/xmpp/stanzas.rs:42-75` — outbound chat state builders
-- `src/xmpp/stanzas.rs:349-358` — inbound filtering logic
+- `src/xmpp/stanzas.rs:69-98` — outbound chat state builders
+- `src/xmpp/stanzas.rs:634` — inbound filtering logic (in `finalize_message`)
 - `src/agent/runtime.rs` — lifecycle integration
+
+---
+
+### XEP-0066: Out of Band Data ✓
+
+File attachment support via out-of-band URLs.
+
+**Inbound parsing:** The agent extracts `<x xmlns='jabber:x:oob'>` elements from incoming messages, supporting multiple attachments per message with optional `<desc>` metadata. When the message body is just a fallback copy of the OOB URL (common in clients like Conversations), the body is automatically stripped to avoid sending the raw URL to the LLM.
+
+**Attachment handling:** OOB URLs are downloaded and their content is included in the LLM prompt alongside the message text, enabling the agent to reason about shared files and images.
+
+**References:**
+- `src/xmpp/stanzas.rs:16` — `OobData` struct
+- `src/xmpp/stanzas.rs:664-689` — OOB parsing and fallback body stripping
+- `src/agent/runtime.rs` — attachment download and LLM prompt integration
+- `src/agent/files.rs` — file download handling
 
 ---
 
@@ -105,9 +123,9 @@ Group chat room support with mention-based interaction.
 **Configuration:** `config/agent.toml` — `[[rooms]]` section with `jid`, `nick`, and optional `mention_pattern`.
 
 **Implementation:**
-- `src/agent/runtime.rs:52-120` — MUC joining, mention detection, response logic
-- `src/agent/memory.rs:220-248` — MUC-specific message storage with sender labels
-- `src/xmpp/stanzas.rs:273-310` — MUC join/message stanza builders
+- `src/agent/runtime.rs` — MUC joining, mention detection, response logic
+- `src/agent/memory.rs` — MUC-specific message storage with sender labels
+- `src/xmpp/stanzas.rs:282-318` — MUC join/message stanza builders
 
 ---
 
@@ -181,7 +199,7 @@ See `docs/DEVELOPING.md` for rationale.
 
 ## Version History
 
-- **v0.1** — XEP-0114 (component mode), XEP-0085 (chat states), XEP-0045 (MUC)
+- **v0.1** — XEP-0114 (component mode), XEP-0085 (chat states), XEP-0045 (MUC), XEP-0066 (OOB file attachments)
 - **v0.2** — (current development)
 
 ---

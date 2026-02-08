@@ -118,6 +118,17 @@ impl ServerConfig {
         }
     }
 
+    /// Whether TLS certificate verification is enabled.
+    ///
+    /// Returns the `tls_verify` setting from client mode, or `true` (default)
+    /// for component mode.
+    pub fn tls_verify(&self) -> bool {
+        match &self.mode {
+            ConnectionMode::Client { tls_verify, .. } => *tls_verify,
+            ConnectionMode::Component { .. } => true,
+        }
+    }
+
     /// Returns the agent's own XMPP domain.
     ///
     /// - Component mode: the component domain (e.g. "agent.localhost")

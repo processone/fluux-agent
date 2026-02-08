@@ -56,6 +56,9 @@ reqwest-eventsource = "0.6"
 shellexpand = "3"
 anyhow = "1.0.101"
 
+# URL parsing (for file download validation)
+url = "2"
+
 # Date/time (session timestamps)
 chrono = "0.4"
 

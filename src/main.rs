@@ -6,12 +6,14 @@ mod sandbox;
 mod skills;
 mod xmpp;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::agent::files::FileDownloader;
 use crate::agent::memory::Memory;
 use crate::agent::runtime::AgentRuntime;
 use crate::backoff::Backoff;
@@ -82,9 +84,10 @@ async fn main() -> Result<()> {
     }
 
     // Initialize components that persist across reconnections
-    let memory = Memory::open(&config.memory.path)?;
+    let memory = Arc::new(Memory::open(&config.memory.path)?);
     let llm = AnthropicClient::new(config.llm.clone());
-    let runtime = AgentRuntime::new(config.clone(), llm, memory);
+    let file_downloader = Arc::new(FileDownloader::with_tls_verify(3, config.server.tls_verify()));
+    let runtime = AgentRuntime::new(config.clone(), llm, memory, file_downloader);
 
     let mut backoff = Backoff::new(
         Duration::from_secs(2),

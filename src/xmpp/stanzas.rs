@@ -1,12 +1,21 @@
 /// XMPP stanza building and parsing.
-/// Manual XML handling — we only need a subset for both
-/// component (XEP-0114) and C2S client protocols.
+/// Uses quick-xml for XML parsing and escaping.
+use std::borrow::Cow;
+
+use quick_xml::escape::escape;
 
 /// Message type — distinguishes 1:1 chat from MUC groupchat
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageType {
     Chat,
     GroupChat,
+}
+
+/// Out-of-Band Data (XEP-0066) — file attachment URL
+#[derive(Debug, Clone)]
+pub struct OobData {
+    pub url: String,
+    pub desc: Option<String>,
 }
 
 /// Parsed incoming message
@@ -17,6 +26,16 @@ pub struct IncomingMessage {
     pub body: String,
     pub id: Option<String>,
     pub message_type: MessageType,
+    /// Out-of-Band Data (XEP-0066) — file attachment URLs from HTTP Upload.
+    /// A single message can contain multiple OOB elements (multiple files).
+    pub oob: Vec<OobData>,
+}
+
+// ── XML escaping helpers ─────────────────────────────────
+
+/// Escape a value for use inside an XML attribute delimited by single quotes.
+fn escape_attr(value: &str) -> Cow<'_, str> {
+    escape(value)
 }
 
 // ── Message stanzas (shared) ─────────────────────────────
@@ -26,11 +45,13 @@ pub struct IncomingMessage {
 /// Includes `<active/>` chat state (XEP-0085) to signal we've stopped typing.
 pub fn build_message(from: Option<&str>, to: &str, body: &str, id: Option<&str>) -> String {
     let from_attr = from
-        .map(|f| format!(" from='{f}'"))
+        .map(|f| format!(" from='{}'", escape_attr(f)))
         .unwrap_or_default();
     let id_attr = id
-        .map(|i| format!(" id='{i}'"))
+        .map(|i| format!(" id='{}'", escape_attr(i)))
         .unwrap_or_default();
+    let to = escape_attr(to);
+    let body = escape(body);
     format!(
         "<message{from_attr} to='{to}' type='chat'{id_attr}>\
          <body>{body}</body>\
@@ -47,8 +68,10 @@ pub fn build_message(from: Option<&str>, to: &str, body: &str, id: Option<&str>)
 /// `msg_type` is `"chat"` for 1:1 or `"groupchat"` for MUC.
 pub fn build_chat_state_composing(from: Option<&str>, to: &str, msg_type: &str) -> String {
     let from_attr = from
-        .map(|f| format!(" from='{f}'"))
+        .map(|f| format!(" from='{}'", escape_attr(f)))
         .unwrap_or_default();
+    let to = escape_attr(to);
+    let msg_type = escape_attr(msg_type);
     format!(
         "<message{from_attr} to='{to}' type='{msg_type}'>\
          <composing xmlns='http://jabber.org/protocol/chatstates'/>\
@@ -63,8 +86,10 @@ pub fn build_chat_state_composing(from: Option<&str>, to: &str, msg_type: &str) 
 /// `msg_type` is `"chat"` for 1:1 or `"groupchat"` for MUC.
 pub fn build_chat_state_paused(from: Option<&str>, to: &str, msg_type: &str) -> String {
     let from_attr = from
-        .map(|f| format!(" from='{f}'"))
+        .map(|f| format!(" from='{}'", escape_attr(f)))
         .unwrap_or_default();
+    let to = escape_attr(to);
+    let msg_type = escape_attr(msg_type);
     format!(
         "<message{from_attr} to='{to}' type='{msg_type}'>\
          <paused xmlns='http://jabber.org/protocol/chatstates'/>\
@@ -76,6 +101,7 @@ pub fn build_chat_state_paused(from: Option<&str>, to: &str, msg_type: &str) -> 
 
 /// Builds the stream opening for component protocol
 pub fn build_stream_open(domain: &str) -> String {
+    let domain = escape_attr(domain);
     format!(
         "<?xml version='1.0'?>\
          <stream:stream \
@@ -99,6 +125,7 @@ pub fn is_handshake_success(data: &str) -> bool {
 
 /// Builds the stream opening for C2S client protocol
 pub fn build_client_stream_open(domain: &str) -> String {
+    let domain = escape_attr(domain);
     format!(
         "<?xml version='1.0'?>\
          <stream:stream \
@@ -191,6 +218,7 @@ pub fn extract_sasl_mechanisms(data: &str) -> Vec<String> {
 
 /// Resource binding request
 pub fn build_bind_request(resource: &str) -> String {
+    let resource = escape(resource);
     format!(
         "<iq type='set' id='bind1'>\
          <bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>\
@@ -211,11 +239,13 @@ pub fn build_initial_presence() -> String {
 
 /// Presence subscription request — ask to see the contact's presence
 pub fn build_subscribe(to: &str) -> String {
+    let to = escape_attr(to);
     format!("<presence to='{to}' type='subscribe'/>")
 }
 
 /// Accept an incoming subscription request — allow the contact to see our presence
 pub fn build_subscribed(to: &str) -> String {
+    let to = escape_attr(to);
     format!("<presence to='{to}' type='subscribed'/>")
 }
 
@@ -245,39 +275,16 @@ pub struct IncomingPresence {
     pub presence_type: PresenceType,
 }
 
-/// Parses an incoming presence stanza from XML.
-/// Returns None if the stanza is not a presence stanza.
-pub fn parse_presence(data: &str) -> Option<IncomingPresence> {
-    if !data.contains("<presence") {
-        return None;
-    }
-
-    let from = extract_attr(data, "from")?;
-    let type_str = extract_attr(data, "type");
-
-    let presence_type = match type_str.as_deref() {
-        Some("subscribe") => PresenceType::Subscribe,
-        Some("subscribed") => PresenceType::Subscribed,
-        Some("unsubscribe") => PresenceType::Unsubscribe,
-        Some("unsubscribed") => PresenceType::Unsubscribed,
-        Some("unavailable") => PresenceType::Unavailable,
-        _ => PresenceType::Available,
-    };
-
-    Some(IncomingPresence {
-        from,
-        presence_type,
-    })
-}
-
 // ── MUC (XEP-0045) ──────────────────────────────────────
 
 /// Builds a MUC join presence stanza (XEP-0045).
 /// `from` is Some for component mode, None for C2S.
 pub fn build_muc_join(room_jid: &str, nick: &str, from: Option<&str>) -> String {
     let from_attr = from
-        .map(|f| format!(" from='{f}'"))
+        .map(|f| format!(" from='{}'", escape_attr(f)))
         .unwrap_or_default();
+    let room_jid = escape_attr(room_jid);
+    let nick = escape_attr(nick);
     // Request zero history — we persist messages ourselves.
     // Without this the server replays the last N messages on every
     // reconnect, creating duplicates in our memory store.
@@ -295,8 +302,10 @@ pub fn build_muc_join(room_jid: &str, nick: &str, from: Option<&str>) -> String 
 /// Includes `<active/>` chat state (XEP-0085) to clear the typing indicator.
 pub fn build_muc_message(from: Option<&str>, to: &str, body: &str) -> String {
     let from_attr = from
-        .map(|f| format!(" from='{f}'"))
+        .map(|f| format!(" from='{}'", escape_attr(f)))
         .unwrap_or_default();
+    let to = escape_attr(to);
+    let body = escape(body);
     format!(
         "<message{from_attr} to='{to}' type='groupchat'>\
          <body>{body}</body>\
@@ -346,145 +355,374 @@ pub fn extract_stream_id(data: &str) -> Option<String> {
     extract_attr(data, "id")
 }
 
-/// Checks if a message stanza is a chat state notification (XEP-0085)
-/// that should be ignored (typing indicators, etc.).
-pub fn is_chat_state_notification(data: &str) -> bool {
-    // XEP-0085 chat states: composing, paused, active, inactive, gone
-    let chat_states = [
-        "<composing",
-        "<paused",
-        "<active",
-        "<inactive",
-        "<gone",
-    ];
-    let has_chat_state = chat_states.iter().any(|s| data.contains(s));
-    let has_body = data.contains("<body>") || data.contains("<body ");
-    // It's a pure chat state notification if it has a chat state but no body
-    has_chat_state && !has_body
+// ── Event-based stanza parser (quick-xml) ────────────────
+
+use quick_xml::events::Event;
+
+/// Result of parsing a complete XMPP stanza from the event stream.
+#[derive(Debug)]
+pub enum XmppStanza {
+    Message(IncomingMessage),
+    Presence(IncomingPresence),
+    StreamError(String),
+    /// IQ, SM ack/req, or any other stanza we don't process
+    Ignored,
+    /// Stream-level elements: `<stream:stream>`, `<?xml?>`, `</stream:stream>`
+    StreamLevel,
 }
 
-/// Extracts an incoming message from XML.
-/// Returns None for stanzas without a body (including chat state notifications).
-pub fn parse_message(data: &str) -> Option<IncomingMessage> {
-    if !data.contains("<message") {
-        return None;
+/// Accumulated child element data during stanza parsing.
+#[derive(Debug, Default)]
+struct ChildElement {
+    name: String,
+    namespace: Option<String>,
+    text: String,
+    children: Vec<ChildElement>,
+}
+
+/// Accumulates events for a single top-level stanza.
+#[derive(Debug, Default)]
+struct StanzaBuilder {
+    root_name: String,
+    root_attrs: Vec<(String, String)>,
+    /// Stack of child elements; last element is the one currently being built.
+    /// When a child End is seen, it's popped and appended to the parent.
+    child_stack: Vec<ChildElement>,
+    /// Completed top-level children (popped from stack when depth returns to stanza root).
+    children: Vec<ChildElement>,
+    /// Direct text content of the root element (rare, used for e.g. `<handshake>hash</handshake>`)
+    root_text: String,
+}
+
+impl StanzaBuilder {
+    fn get_root_attr(&self, name: &str) -> Option<&str> {
+        self.root_attrs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 
-    // Skip chat state notifications (XEP-0085: composing, paused, active, etc.)
-    if is_chat_state_notification(data) {
-        return None;
+    /// Find a direct child by local name.
+    fn find_child(&self, name: &str) -> Option<&ChildElement> {
+        self.children.iter().find(|c| c.name == name)
     }
 
-    let from = extract_attr(data, "from")?;
-    let to = extract_attr(data, "to");
-    let id = extract_attr(data, "id");
-    let body = extract_element_text(data, "body")?;
-
-    // Extra guard: skip messages with empty or whitespace-only bodies
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return None;
+    /// Collect all direct children matching name + xmlns.
+    fn find_children_ns(&self, name: &str, ns: &str) -> Vec<&ChildElement> {
+        self.children
+            .iter()
+            .filter(|c| c.name == name && c.namespace.as_deref() == Some(ns))
+            .collect()
     }
 
-    let message_type = match extract_attr(data, "type").as_deref() {
+    /// Check if any direct child has a given local name (used for chat state detection).
+    fn has_child_with_name(&self, names: &[&str]) -> bool {
+        self.children.iter().any(|c| names.contains(&c.name.as_str()))
+    }
+}
+
+impl ChildElement {
+    fn find_child(&self, name: &str) -> Option<&ChildElement> {
+        self.children.iter().find(|c| c.name == name)
+    }
+}
+
+/// Parser state machine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ParserState {
+    /// Waiting for a stanza to start (between stanzas, or before stream open).
+    Idle,
+    /// Inside a top-level stanza, collecting events.
+    InStanza,
+}
+
+/// Event-driven XMPP stanza parser.
+///
+/// Feed quick-xml `Event`s into `feed()`. When a complete top-level stanza
+/// has been collected, `feed()` returns `Some(XmppStanza)`.
+///
+/// Handles the XMPP stream wrapper: `<stream:stream>` sets a depth offset
+/// so that stanzas (depth-1 children of the stream) are recognized correctly.
+pub struct StanzaParser {
+    depth: u32,
+    /// Depth at which stanzas live (0 before stream:stream, 1 after).
+    stream_depth: u32,
+    state: ParserState,
+    builder: StanzaBuilder,
+}
+
+impl StanzaParser {
+    pub fn new() -> Self {
+        Self {
+            depth: 0,
+            stream_depth: 0,
+            state: ParserState::Idle,
+            builder: StanzaBuilder::default(),
+        }
+    }
+
+    /// Feed a quick-xml event into the parser.
+    /// Returns `Some(XmppStanza)` when a complete stanza has been parsed.
+    pub fn feed(&mut self, event: Event<'_>) -> Option<XmppStanza> {
+        match event {
+            Event::Decl(_) | Event::PI(_) | Event::Comment(_) | Event::DocType(_) => {
+                // Stream-level noise — ignore
+                None
+            }
+            Event::Start(ref e) => {
+                let name = local_name_str(e.name().as_ref());
+
+                // Handle stream:stream wrapper
+                if self.state == ParserState::Idle
+                    && (name == "stream" || e.name().as_ref() == b"stream:stream")
+                {
+                    self.depth += 1;
+                    self.stream_depth = self.depth;
+                    return Some(XmppStanza::StreamLevel);
+                }
+
+                self.depth += 1;
+
+                if self.state == ParserState::Idle && self.depth == self.stream_depth + 1 {
+                    // Start of a new stanza
+                    self.state = ParserState::InStanza;
+                    self.builder = StanzaBuilder::default();
+                    self.builder.root_name = name;
+                    self.builder.root_attrs = extract_attrs_from_event(e);
+                } else if self.state == ParserState::InStanza {
+                    // Child element start
+                    let child = ChildElement {
+                        name,
+                        namespace: extract_xmlns_from_event(e),
+                        ..Default::default()
+                    };
+                    self.builder.child_stack.push(child);
+                }
+                None
+            }
+            Event::Empty(ref e) => {
+                let name = local_name_str(e.name().as_ref());
+
+                if self.state == ParserState::Idle && self.depth == self.stream_depth {
+                    // Self-closing top-level stanza (e.g. <r/>, <presence ... />)
+                    let builder = StanzaBuilder {
+                        root_name: name,
+                        root_attrs: extract_attrs_from_event(e),
+                        ..Default::default()
+                    };
+                    return Some(finalize_stanza(&builder));
+                } else if self.state == ParserState::InStanza {
+                    // Self-closing child element
+                    let child = ChildElement {
+                        name,
+                        namespace: extract_xmlns_from_event(e),
+                        ..Default::default()
+                    };
+                    // Add to parent or to top-level children
+                    if let Some(parent) = self.builder.child_stack.last_mut() {
+                        parent.children.push(child);
+                    } else {
+                        self.builder.children.push(child);
+                    }
+                }
+                None
+            }
+            Event::Text(ref e) => {
+                if self.state == ParserState::InStanza {
+                    let text = e.unescape().unwrap_or_default();
+                    if let Some(current) = self.builder.child_stack.last_mut() {
+                        current.text.push_str(&text);
+                    } else {
+                        self.builder.root_text.push_str(&text);
+                    }
+                }
+                None
+            }
+            Event::CData(ref e) => {
+                if self.state == ParserState::InStanza {
+                    if let Ok(text) = std::str::from_utf8(e.as_ref()) {
+                        if let Some(current) = self.builder.child_stack.last_mut() {
+                            current.text.push_str(text);
+                        } else {
+                            self.builder.root_text.push_str(text);
+                        }
+                    }
+                }
+                None
+            }
+            Event::End(ref e) => {
+                let name = local_name_str(e.name().as_ref());
+
+                // Handle </stream:stream>
+                if (name == "stream" || e.name().as_ref() == b"stream:stream")
+                    && self.depth == self.stream_depth
+                {
+                    self.depth = self.depth.saturating_sub(1);
+                    self.stream_depth = 0;
+                    self.state = ParserState::Idle;
+                    return Some(XmppStanza::StreamLevel);
+                }
+
+                self.depth = self.depth.saturating_sub(1);
+
+                if self.state == ParserState::InStanza {
+                    if self.depth == self.stream_depth {
+                        // Stanza complete
+                        self.state = ParserState::Idle;
+                        return Some(finalize_stanza(&self.builder));
+                    } else {
+                        // Child element closed — pop from stack
+                        if let Some(child) = self.builder.child_stack.pop() {
+                            if let Some(parent) = self.builder.child_stack.last_mut() {
+                                parent.children.push(child);
+                            } else {
+                                self.builder.children.push(child);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Event::Eof => None,
+        }
+    }
+}
+
+/// Extract the local name as a String from raw bytes.
+fn local_name_str(name_bytes: &[u8]) -> String {
+    let full = std::str::from_utf8(name_bytes).unwrap_or("");
+    // Strip namespace prefix if present (e.g. "stream:stream" -> "stream")
+    // But keep full qualified name for stream:stream detection
+    full.to_string()
+}
+
+/// Extract all attributes from a BytesStart event as (key, value) pairs.
+fn extract_attrs_from_event(e: &quick_xml::events::BytesStart<'_>) -> Vec<(String, String)> {
+    e.attributes()
+        .filter_map(|a| a.ok())
+        .map(|a| {
+            let key = std::str::from_utf8(a.key.as_ref())
+                .unwrap_or("")
+                .to_string();
+            let value = a
+                .unescape_value()
+                .unwrap_or_default()
+                .into_owned();
+            (key, value)
+        })
+        .collect()
+}
+
+/// Extract the `xmlns` attribute from a BytesStart event, if present.
+fn extract_xmlns_from_event(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
+    e.try_get_attribute(b"xmlns")
+        .ok()
+        .flatten()
+        .and_then(|a| a.unescape_value().ok().map(|v| v.into_owned()))
+}
+
+/// Convert a completed StanzaBuilder into an XmppStanza.
+fn finalize_stanza(builder: &StanzaBuilder) -> XmppStanza {
+    match builder.root_name.as_str() {
+        "message" => finalize_message(builder),
+        "presence" => finalize_presence(builder),
+        "stream:error" => finalize_stream_error(builder),
+        _ => XmppStanza::Ignored,
+    }
+}
+
+fn finalize_message(builder: &StanzaBuilder) -> XmppStanza {
+    let from = match builder.get_root_attr("from") {
+        Some(f) => f.to_string(),
+        None => return XmppStanza::Ignored,
+    };
+    let to = builder.get_root_attr("to").unwrap_or("").to_string();
+    let id = builder.get_root_attr("id").map(String::from);
+
+    let message_type = match builder.get_root_attr("type") {
         Some("groupchat") => MessageType::GroupChat,
         _ => MessageType::Chat,
     };
 
-    Some(IncomingMessage {
+    // Check for chat state notification (XEP-0085): composing/paused/active/inactive/gone
+    let chat_state_names = ["composing", "paused", "active", "inactive", "gone"];
+    let has_chat_state = builder.has_child_with_name(&chat_state_names);
+
+    // Extract body text
+    let body_raw = builder
+        .find_child("body")
+        .map(|c| c.text.clone())
+        .unwrap_or_default();
+
+    let has_body = !body_raw.is_empty();
+
+    // If chat state only (no body), skip
+    if has_chat_state && !has_body {
+        return XmppStanza::Ignored;
+    }
+
+    // Parse OOB data (XEP-0066)
+    let oob_elements = builder.find_children_ns("x", "jabber:x:oob");
+    let oob: Vec<OobData> = oob_elements
+        .into_iter()
+        .filter_map(|x| {
+            let url = x.find_child("url").map(|u| u.text.clone())?;
+            if url.is_empty() {
+                return None;
+            }
+            let desc = x
+                .find_child("desc")
+                .map(|d| d.text.clone())
+                .filter(|d| !d.is_empty());
+            Some(OobData { url, desc })
+        })
+        .collect();
+
+    // OOB body fallback: if body == one of the OOB URLs, strip it
+    let body = if !oob.is_empty() && oob.iter().any(|o| body_raw.trim() == o.url) {
+        String::new()
+    } else {
+        body_raw.trim().to_string()
+    };
+
+    // Skip if no body and no OOB
+    if body.is_empty() && oob.is_empty() {
+        return XmppStanza::Ignored;
+    }
+
+    XmppStanza::Message(IncomingMessage {
         from,
-        to: to.unwrap_or_default(),
-        body: trimmed.to_string(),
+        to,
+        body,
         id,
         message_type,
+        oob,
     })
 }
 
-/// Extracts an attribute value from an XML tag
-pub fn extract_attr(xml: &str, attr: &str) -> Option<String> {
-    let patterns = [format!("{attr}='"), format!("{attr}=\"")];
-    for pattern in &patterns {
-        if let Some(start) = xml.find(pattern.as_str()) {
-            let after = &xml[start + pattern.len()..];
-            let quote = pattern.chars().last().unwrap();
-            if let Some(end) = after.find(quote) {
-                return Some(after[..end].to_string());
-            }
-        }
-    }
-    None
+fn finalize_presence(builder: &StanzaBuilder) -> XmppStanza {
+    let from = match builder.get_root_attr("from") {
+        Some(f) => f.to_string(),
+        None => return XmppStanza::Ignored,
+    };
+
+    let presence_type = match builder.get_root_attr("type") {
+        Some("subscribe") => PresenceType::Subscribe,
+        Some("subscribed") => PresenceType::Subscribed,
+        Some("unsubscribe") => PresenceType::Unsubscribe,
+        Some("unsubscribed") => PresenceType::Unsubscribed,
+        Some("unavailable") => PresenceType::Unavailable,
+        _ => PresenceType::Available,
+    };
+
+    XmppStanza::Presence(IncomingPresence {
+        from,
+        presence_type,
+    })
 }
 
-/// Extracts the bare JID (without resource) from a full or bare JID.
-///
-/// - `"user@localhost/mobile"` → `"user@localhost"`
-/// - `"user@localhost"` → `"user@localhost"`
-/// - `"localhost"` → `"localhost"` (domain-only)
-pub fn bare_jid(jid: &str) -> &str {
-    jid.split('/').next().unwrap_or(jid)
-}
-
-/// Extracts a complete presence stanza from the XML buffer.
-/// Handles both self-closing `<presence ... />` and `<presence>...</presence>`.
-/// Returns `(stanza_text, end_position)` or `None` if the stanza is incomplete.
-pub fn extract_presence_stanza(buffer: &str) -> Option<(String, usize)> {
-    let start = buffer.find("<presence")?;
-    let after_tag = &buffer[start..];
-
-    // Check for self-closing first: <presence ... />
-    // A self-closing tag has /> before any > that opens the tag body.
-    // e.g. <presence from='u@l' type='subscribe'/>
-    // vs   <presence from='u@l'><x xmlns='muc'/></presence>
-    if let Some(close_pos) = after_tag.find("/>") {
-        // Check if there's a plain '>' before the '/>' — that would mean the
-        // <presence> tag body was opened and the /> belongs to a child element.
-        let before_close = &after_tag[..close_pos];
-        let tag_opened = before_close
-            .find('>')
-            .map(|pos| !before_close[..pos + 1].ends_with("/>"))
-            .unwrap_or(false);
-        if !tag_opened {
-            let stanza_end = start + close_pos + "/>".len();
-            return Some((buffer[start..stanza_end].to_string(), stanza_end));
-        }
-    }
-
-    // Full closing tag: <presence>...</presence>
-    if let Some(close_pos) = after_tag.find("</presence>") {
-        let stanza_end = start + close_pos + "</presence>".len();
-        return Some((buffer[start..stanza_end].to_string(), stanza_end));
-    }
-
-    None // incomplete stanza
-}
-
-// ── Stream error parsing ──────────────────────────────────
-
-/// Extracts a complete `<stream:error>` stanza from the XML buffer.
-/// Returns `(stanza_text, end_position)` or `None` if not found/incomplete.
-pub fn extract_stream_error_stanza(buffer: &str) -> Option<(String, usize)> {
-    let start = buffer.find("<stream:error")?;
-    let after_tag = &buffer[start..];
-    if let Some(close_pos) = after_tag.find("</stream:error>") {
-        let stanza_end = start + close_pos + "</stream:error>".len();
-        return Some((buffer[start..stanza_end].to_string(), stanza_end));
-    }
-    None // incomplete
-}
-
-/// Parses a `<stream:error>` stanza and extracts the error condition.
-///
-/// XMPP stream errors contain a child element from the
-/// `urn:ietf:params:xml:ns:xmpp-streams` namespace that identifies
-/// the condition (e.g. `<conflict/>`, `<host-unknown/>`).
-///
-/// Returns the condition name (e.g. `"conflict"`, `"host-unknown"`).
-pub fn parse_stream_error(xml: &str) -> Option<String> {
-    if !xml.contains("<stream:error") {
-        return None;
-    }
-
-    // Known XMPP stream error conditions (RFC 6120 §4.9.3)
+fn finalize_stream_error(builder: &StanzaBuilder) -> XmppStanza {
+    // XMPP stream errors contain a child element from urn:ietf:params:xml:ns:xmpp-streams
     let conditions = [
         "bad-format",
         "bad-namespace-prefix",
@@ -513,28 +751,92 @@ pub fn parse_stream_error(xml: &str) -> Option<String> {
         "unsupported-version",
     ];
 
-    for condition in &conditions {
-        if xml.contains(&format!("<{condition}")) {
-            return Some(condition.to_string());
+    for child in &builder.children {
+        if conditions.contains(&child.name.as_str()) {
+            return XmppStanza::StreamError(child.name.clone());
         }
     }
 
-    // Unknown condition — return generic
-    Some("unknown".to_string())
+    XmppStanza::StreamError("unknown".to_string())
 }
 
-/// Extracts text between <tag> and </tag>
+/// Extracts an attribute value from the first XML element found.
+/// Uses quick-xml for correct handling of quotes and entities.
+pub fn extract_attr(xml: &str, attr: &str) -> Option<String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                if let Some(a) = e
+                    .try_get_attribute(attr.as_bytes())
+                    .ok()
+                    .flatten()
+                {
+                    return a
+                        .unescape_value()
+                        .ok()
+                        .map(|v| v.into_owned());
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Extracts the bare JID (without resource) from a full or bare JID.
+///
+/// - `"user@localhost/mobile"` → `"user@localhost"`
+/// - `"user@localhost"` → `"user@localhost"`
+/// - `"localhost"` → `"localhost"` (domain-only)
+pub fn bare_jid(jid: &str) -> &str {
+    jid.split('/').next().unwrap_or(jid)
+}
+
+/// Extracts text content of the first element matching `tag`.
+/// Uses quick-xml for correct handling of entities and CDATA.
 pub fn extract_element_text(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open)?;
-    let after = &xml[start + open.len()..];
-    let end = after.find(&close)?;
-    let text = &after[..end];
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.to_string())
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let tag_bytes = tag.as_bytes();
+    let mut inside_target = false;
+    let mut text = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                if e.local_name().as_ref() == tag_bytes {
+                    inside_target = true;
+                    text.clear();
+                }
+            }
+            Ok(Event::Text(ref e)) if inside_target => {
+                if let Ok(t) = e.unescape() {
+                    text.push_str(&t);
+                }
+            }
+            Ok(Event::CData(ref e)) if inside_target => {
+                if let Ok(t) = std::str::from_utf8(e.as_ref()) {
+                    text.push_str(t);
+                }
+            }
+            Ok(Event::End(ref e)) if inside_target => {
+                if e.local_name().as_ref() == tag_bytes {
+                    return if text.is_empty() { None } else { Some(text) };
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
     }
 }
 
@@ -551,15 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_message() {
-        let xml = "<message from='user@localhost/res' to='agent.localhost' type='chat' id='msg1'>\
-                   <body>Hello agent</body></message>";
-        let msg = parse_message(xml).unwrap();
-        assert_eq!(msg.from, "user@localhost/res");
-        assert_eq!(msg.body, "Hello agent");
-    }
-
-    #[test]
     fn test_build_message_with_from() {
         let xml = build_message(Some("agent.localhost"), "user@localhost", "Hi!", None);
         assert!(xml.contains("from='agent.localhost'"));
@@ -572,6 +865,33 @@ mod tests {
         assert!(!xml.contains("from="));
         assert!(xml.contains("to='user@localhost'"));
         assert!(xml.contains("<body>Hi!</body>"));
+    }
+
+    // ── XML escaping tests ───────────────────────────────
+
+    #[test]
+    fn test_build_message_escapes_body() {
+        let xml = build_message(None, "user@localhost", "Tom & Jerry's <show>", None);
+        assert!(xml.contains("<body>Tom &amp; Jerry&apos;s &lt;show&gt;</body>"));
+    }
+
+    #[test]
+    fn test_build_message_escapes_to_attribute() {
+        let xml = build_message(None, "user@localhost/it's", "Hi", None);
+        assert!(xml.contains("to='user@localhost/it&apos;s'"));
+    }
+
+    #[test]
+    fn test_build_muc_message_escapes_body() {
+        let xml = build_muc_message(None, "room@conf.local", "2 > 1 & 1 < 2");
+        assert!(xml.contains("<body>2 &gt; 1 &amp; 1 &lt; 2</body>"));
+    }
+
+    #[test]
+    fn test_build_message_normal_text_unchanged() {
+        // No special chars => body is verbatim
+        let xml = build_message(None, "user@localhost", "Hello world", None);
+        assert!(xml.contains("<body>Hello world</body>"));
     }
 
     #[test]
@@ -611,62 +931,6 @@ mod tests {
             extract_bound_jid(xml),
             Some("bot@localhost/fluux-agent".to_string())
         );
-    }
-
-    #[test]
-    fn test_filter_composing_notification() {
-        // XEP-0085: <composing/> without body → should be ignored
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <composing xmlns='http://jabber.org/protocol/chatstates'/>\
-                   </message>";
-        assert!(is_chat_state_notification(xml));
-        assert!(parse_message(xml).is_none());
-    }
-
-    #[test]
-    fn test_filter_paused_notification() {
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <paused xmlns='http://jabber.org/protocol/chatstates'/>\
-                   </message>";
-        assert!(is_chat_state_notification(xml));
-        assert!(parse_message(xml).is_none());
-    }
-
-    #[test]
-    fn test_filter_active_notification() {
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <active xmlns='http://jabber.org/protocol/chatstates'/>\
-                   </message>";
-        assert!(is_chat_state_notification(xml));
-        assert!(parse_message(xml).is_none());
-    }
-
-    #[test]
-    fn test_message_with_body_and_active_state_passes() {
-        // Message WITH body + chat state → should parse normally
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <body>Hello!</body>\
-                   <active xmlns='http://jabber.org/protocol/chatstates'/>\
-                   </message>";
-        assert!(!is_chat_state_notification(xml));
-        let msg = parse_message(xml).unwrap();
-        assert_eq!(msg.body, "Hello!");
-    }
-
-    #[test]
-    fn test_message_with_empty_body_filtered() {
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <body></body>\
-                   </message>";
-        assert!(parse_message(xml).is_none());
-    }
-
-    #[test]
-    fn test_message_body_trimmed() {
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <body>  Hello agent  </body></message>";
-        let msg = parse_message(xml).unwrap();
-        assert_eq!(msg.body, "Hello agent");
     }
 
     // ── Outbound chat state tests (XEP-0085) ─────────────
@@ -748,45 +1012,6 @@ mod tests {
     fn test_build_subscribed() {
         let xml = build_subscribed("user@localhost");
         assert_eq!(xml, "<presence to='user@localhost' type='subscribed'/>");
-    }
-
-    #[test]
-    fn test_parse_presence_subscribe() {
-        let xml = "<presence from='user@localhost' to='bot@localhost' type='subscribe'/>";
-        let pres = parse_presence(xml).unwrap();
-        assert_eq!(pres.from, "user@localhost");
-        assert_eq!(pres.presence_type, PresenceType::Subscribe);
-    }
-
-    #[test]
-    fn test_parse_presence_subscribed() {
-        let xml = "<presence from='user@localhost' to='bot@localhost' type='subscribed'/>";
-        let pres = parse_presence(xml).unwrap();
-        assert_eq!(pres.from, "user@localhost");
-        assert_eq!(pres.presence_type, PresenceType::Subscribed);
-    }
-
-    #[test]
-    fn test_parse_presence_available() {
-        // No type attribute = available
-        let xml = "<presence from='user@localhost/mobile'><show>chat</show></presence>";
-        let pres = parse_presence(xml).unwrap();
-        assert_eq!(pres.from, "user@localhost/mobile");
-        assert_eq!(pres.presence_type, PresenceType::Available);
-    }
-
-    #[test]
-    fn test_parse_presence_unavailable() {
-        let xml = "<presence from='user@localhost/res' type='unavailable'/>";
-        let pres = parse_presence(xml).unwrap();
-        assert_eq!(pres.from, "user@localhost/res");
-        assert_eq!(pres.presence_type, PresenceType::Unavailable);
-    }
-
-    #[test]
-    fn test_parse_presence_not_a_presence() {
-        let xml = "<message from='user@localhost' type='chat'><body>Hi</body></message>";
-        assert!(parse_presence(xml).is_none());
     }
 
     // ── Roster tests ────────────────────────────────────
@@ -950,77 +1175,6 @@ mod tests {
         assert_eq!(extract_element_text(xml, "jid"), None);
     }
 
-    #[test]
-    fn test_parse_message_extracts_all_fields() {
-        let xml = "<message from='user@localhost/res' to='agent.localhost' type='chat' id='msg42'>\
-                   <body>Test message</body></message>";
-        let msg = parse_message(xml).unwrap();
-        assert_eq!(msg.from, "user@localhost/res");
-        assert_eq!(msg.to, "agent.localhost");
-        assert_eq!(msg.body, "Test message");
-        assert_eq!(msg.id, Some("msg42".to_string()));
-    }
-
-    #[test]
-    fn test_parse_message_without_id() {
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <body>No ID here</body></message>";
-        let msg = parse_message(xml).unwrap();
-        assert_eq!(msg.id, None);
-    }
-
-    #[test]
-    fn test_parse_message_no_message_tag() {
-        let xml = "<iq type='result'><query/></iq>";
-        assert!(parse_message(xml).is_none());
-    }
-
-    #[test]
-    fn test_chat_state_gone_filtered() {
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <gone xmlns='http://jabber.org/protocol/chatstates'/>\
-                   </message>";
-        assert!(is_chat_state_notification(xml));
-        assert!(parse_message(xml).is_none());
-    }
-
-    #[test]
-    fn test_chat_state_inactive_filtered() {
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <inactive xmlns='http://jabber.org/protocol/chatstates'/>\
-                   </message>";
-        assert!(is_chat_state_notification(xml));
-        assert!(parse_message(xml).is_none());
-    }
-
-    // ── MessageType tests ──────────────────────────────
-
-    #[test]
-    fn test_parse_message_chat_type() {
-        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
-                   <body>Hello</body></message>";
-        let msg = parse_message(xml).unwrap();
-        assert_eq!(msg.message_type, MessageType::Chat);
-    }
-
-    #[test]
-    fn test_parse_message_groupchat_type() {
-        let xml = "<message from='lobby@conference.localhost/alice' to='bot@localhost' type='groupchat'>\
-                   <body>Hey everyone</body></message>";
-        let msg = parse_message(xml).unwrap();
-        assert_eq!(msg.message_type, MessageType::GroupChat);
-        assert_eq!(msg.from, "lobby@conference.localhost/alice");
-        assert_eq!(msg.body, "Hey everyone");
-    }
-
-    #[test]
-    fn test_parse_message_no_type_defaults_to_chat() {
-        let xml = "<message from='user@localhost/res' to='bot@localhost'>\
-                   <body>Hi</body></message>";
-        let msg = parse_message(xml).unwrap();
-        assert_eq!(msg.message_type, MessageType::Chat);
-    }
-
     // ── MUC stanza builder tests ───────────────────────
 
     #[test]
@@ -1060,29 +1214,6 @@ mod tests {
         assert!(xml.contains("<active xmlns='http://jabber.org/protocol/chatstates'/>"));
     }
 
-    #[test]
-    fn test_groupchat_composing_notification_filtered() {
-        // MUC composing notification without body → should be filtered
-        let xml = "<message from='lobby@conference.localhost/alice' to='bot@localhost' type='groupchat'>\
-                   <composing xmlns='http://jabber.org/protocol/chatstates'/>\
-                   </message>";
-        assert!(is_chat_state_notification(xml));
-        assert!(parse_message(xml).is_none());
-    }
-
-    #[test]
-    fn test_groupchat_message_with_body_and_state_passes() {
-        // MUC message with body + active state → should parse with GroupChat type
-        let xml = "<message from='lobby@conference.localhost/alice' to='bot@localhost' type='groupchat'>\
-                   <body>Hello room!</body>\
-                   <active xmlns='http://jabber.org/protocol/chatstates'/>\
-                   </message>";
-        assert!(!is_chat_state_notification(xml));
-        let msg = parse_message(xml).unwrap();
-        assert_eq!(msg.message_type, MessageType::GroupChat);
-        assert_eq!(msg.body, "Hello room!");
-    }
-
     // ── bare_jid tests ─────────────────────────────────
 
     #[test]
@@ -1108,132 +1239,378 @@ mod tests {
         );
     }
 
-    // ── extract_presence_stanza tests ──────────────────
+    // ── StanzaParser tests (quick-xml event-based) ──────
 
-    #[test]
-    fn test_extract_presence_self_closing() {
-        let buf = "<presence from='user@localhost' type='subscribe'/>";
-        let (stanza, end) = extract_presence_stanza(buf).unwrap();
-        assert_eq!(stanza, buf);
-        assert_eq!(end, buf.len());
+    /// Helper: parse a complete XML fragment through StanzaParser using sync quick-xml.
+    fn parse_xml_to_stanza(xml: &str) -> Option<XmppStanza> {
+        use quick_xml::Reader;
+
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut parser = StanzaParser::new();
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Eof) => return None,
+                Ok(event) => {
+                    if let Some(stanza) = parser.feed(event) {
+                        return Some(stanza);
+                    }
+                }
+                Err(_) => return None,
+            }
+            buf.clear();
+        }
+    }
+
+    /// Helper: parse within a stream:stream wrapper (like the real event loop).
+    fn parse_xml_in_stream(xml: &str) -> Vec<XmppStanza> {
+        use quick_xml::Reader;
+
+        let wrapped = format!(
+            "<stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>{xml}</stream:stream>"
+        );
+        let mut reader = Reader::from_str(&wrapped);
+        reader.config_mut().trim_text(true);
+        let mut parser = StanzaParser::new();
+        let mut buf = Vec::new();
+        let mut results = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Eof) => break,
+                Ok(event) => {
+                    if let Some(stanza) = parser.feed(event) {
+                        results.push(stanza);
+                    }
+                }
+                Err(_) => break,
+            }
+            buf.clear();
+        }
+        results
     }
 
     #[test]
-    fn test_extract_presence_full_closing() {
-        let buf = "<presence from='user@localhost/res'><show>chat</show></presence>";
-        let (stanza, end) = extract_presence_stanza(buf).unwrap();
-        assert_eq!(stanza, buf);
-        assert_eq!(end, buf.len());
+    fn test_sp_simple_message() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat' id='m1'>\
+                   <body>Hello agent</body></message>";
+        let stanza = parse_xml_to_stanza(xml).unwrap();
+        match stanza {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.from, "user@localhost/res");
+                assert_eq!(msg.to, "bot@localhost");
+                assert_eq!(msg.body, "Hello agent");
+                assert_eq!(msg.id, Some("m1".to_string()));
+                assert_eq!(msg.message_type, MessageType::Chat);
+                assert!(msg.oob.is_empty());
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_extract_presence_incomplete() {
-        let buf = "<presence from='user@localhost' type='sub";
-        assert!(extract_presence_stanza(buf).is_none());
+    fn test_sp_groupchat_message() {
+        let xml = "<message from='room@conf/nick' to='bot@localhost' type='groupchat'>\
+                   <body>Hey room</body></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.message_type, MessageType::GroupChat);
+                assert_eq!(msg.body, "Hey room");
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_extract_presence_with_trailing_data() {
-        let buf = "<presence from='u@l' type='subscribed'/>some trailing data";
-        let (stanza, end) = extract_presence_stanza(buf).unwrap();
-        assert_eq!(stanza, "<presence from='u@l' type='subscribed'/>");
-        assert!(end < buf.len());
+    fn test_sp_chat_state_composing_filtered() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <composing xmlns='http://jabber.org/protocol/chatstates'/></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Ignored => {}
+            other => panic!("Expected Ignored, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_extract_presence_no_presence() {
-        let buf = "<message from='user@localhost'><body>Hi</body></message>";
-        assert!(extract_presence_stanza(buf).is_none());
+    fn test_sp_chat_state_paused_filtered() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <paused xmlns='http://jabber.org/protocol/chatstates'/></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Ignored => {}
+            other => panic!("Expected Ignored, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_extract_presence_empty_buffer() {
-        assert!(extract_presence_stanza("").is_none());
+    fn test_sp_message_with_body_and_state_passes() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <body>Hello!</body>\
+                   <active xmlns='http://jabber.org/protocol/chatstates'/></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => assert_eq!(msg.body, "Hello!"),
+            other => panic!("Expected Message, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_extract_presence_preceded_by_other_stanzas() {
-        let buf = "<iq type='result'/><presence from='u@l' type='available'/>";
-        let (stanza, _end) = extract_presence_stanza(buf).unwrap();
-        assert_eq!(stanza, "<presence from='u@l' type='available'/>");
+    fn test_sp_message_empty_body_filtered() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <body></body></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Ignored => {}
+            other => panic!("Expected Ignored, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_extract_presence_muc_join_with_children() {
-        // MUC presence has child elements with self-closing tags —
-        // the /> belongs to <item/>, not <presence>
-        let buf = "<presence from='room@conf/nick'>\
-                   <x xmlns='http://jabber.org/protocol/muc#user'>\
-                   <item affiliation='member' role='participant'/>\
-                   </x></presence>";
-        let (stanza, end) = extract_presence_stanza(buf).unwrap();
-        assert_eq!(stanza, buf);
-        assert_eq!(end, buf.len());
+    fn test_sp_message_body_trimmed() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <body>  Hello agent  </body></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => assert_eq!(msg.body, "Hello agent"),
+            other => panic!("Expected Message, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_extract_presence_full_with_child_elements() {
-        // <show> and <status> inside — the /> should not match <presence>
-        let buf = "<presence from='u@l'><show>away</show><status>BRB</status></presence>";
-        let (stanza, end) = extract_presence_stanza(buf).unwrap();
-        assert_eq!(stanza, buf);
-        assert_eq!(end, buf.len());
+    fn test_sp_message_no_from_ignored() {
+        let xml = "<message to='bot@localhost' type='chat'><body>Hi</body></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Ignored => {}
+            other => panic!("Expected Ignored, got {other:?}"),
+        }
     }
 
-    // ── Stream error tests ──────────────────────────────
+    #[test]
+    fn test_sp_oob_with_body() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <body>Check this out</body>\
+                   <x xmlns='jabber:x:oob'><url>https://example.com/file.png</url></x></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.body, "Check this out");
+                assert_eq!(msg.oob.len(), 1);
+                assert_eq!(msg.oob[0].url, "https://example.com/file.png");
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
 
     #[test]
-    fn test_parse_stream_error_conflict() {
+    fn test_sp_oob_fallback_body_stripped() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <body>https://example.com/file.png</body>\
+                   <x xmlns='jabber:x:oob'><url>https://example.com/file.png</url></x></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert!(msg.body.is_empty(), "Fallback body should be stripped");
+                assert_eq!(msg.oob.len(), 1);
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_oob_only_no_body() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <x xmlns='jabber:x:oob'><url>https://example.com/file.png</url></x></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert!(msg.body.is_empty());
+                assert_eq!(msg.oob.len(), 1);
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_multiple_oob() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <body>Two files</body>\
+                   <x xmlns='jabber:x:oob'><url>https://example.com/a.png</url></x>\
+                   <x xmlns='jabber:x:oob'><url>https://example.com/b.pdf</url><desc>Doc</desc></x></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.oob.len(), 2);
+                assert_eq!(msg.oob[0].url, "https://example.com/a.png");
+                assert!(msg.oob[0].desc.is_none());
+                assert_eq!(msg.oob[1].url, "https://example.com/b.pdf");
+                assert_eq!(msg.oob[1].desc.as_deref(), Some("Doc"));
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_presence_subscribe() {
+        let xml = "<presence from='user@localhost' to='bot@localhost' type='subscribe'/>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Presence(p) => {
+                assert_eq!(p.from, "user@localhost");
+                assert_eq!(p.presence_type, PresenceType::Subscribe);
+            }
+            other => panic!("Expected Presence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_presence_available() {
+        let xml = "<presence from='user@localhost/mobile'><show>chat</show></presence>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Presence(p) => {
+                assert_eq!(p.from, "user@localhost/mobile");
+                assert_eq!(p.presence_type, PresenceType::Available);
+            }
+            other => panic!("Expected Presence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_presence_unavailable() {
+        let xml = "<presence from='user@localhost/res' type='unavailable'/>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Presence(p) => {
+                assert_eq!(p.from, "user@localhost/res");
+                assert_eq!(p.presence_type, PresenceType::Unavailable);
+            }
+            other => panic!("Expected Presence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_stream_error_conflict() {
         let xml = "<stream:error><conflict xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>";
-        assert_eq!(parse_stream_error(xml), Some("conflict".to_string()));
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::StreamError(c) => assert_eq!(c, "conflict"),
+            other => panic!("Expected StreamError, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_parse_stream_error_host_unknown() {
-        let xml = "<stream:error><host-unknown xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>";
-        assert_eq!(parse_stream_error(xml), Some("host-unknown".to_string()));
-    }
-
-    #[test]
-    fn test_parse_stream_error_system_shutdown() {
+    fn test_sp_stream_error_system_shutdown() {
         let xml = "<stream:error><system-shutdown xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>";
-        assert_eq!(parse_stream_error(xml), Some("system-shutdown".to_string()));
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::StreamError(c) => assert_eq!(c, "system-shutdown"),
+            other => panic!("Expected StreamError, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_parse_stream_error_with_text() {
-        let xml = "<stream:error>\
-                   <conflict xmlns='urn:ietf:params:xml:ns:xmpp-streams'/>\
-                   <text xmlns='urn:ietf:params:xml:ns:xmpp-streams'>Replaced by new connection</text>\
-                   </stream:error>";
-        assert_eq!(parse_stream_error(xml), Some("conflict".to_string()));
+    fn test_sp_iq_ignored() {
+        let xml = "<iq type='result' id='1'><query/></iq>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Ignored => {}
+            other => panic!("Expected Ignored, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_parse_stream_error_not_a_stream_error() {
-        let xml = "<message from='user@localhost'><body>Hi</body></message>";
-        assert_eq!(parse_stream_error(xml), None);
+    fn test_sp_self_closing_ignored() {
+        let xml = "<r xmlns='urn:xmpp:sm:3'/>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Ignored => {}
+            other => panic!("Expected Ignored, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_extract_stream_error_stanza() {
-        let buf = "some data<stream:error><conflict xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>more";
-        let (stanza, end) = extract_stream_error_stanza(buf).unwrap();
-        assert!(stanza.contains("<conflict"));
-        assert!(stanza.starts_with("<stream:error>"));
-        assert!(stanza.ends_with("</stream:error>"));
-        assert!(end < buf.len());
+    fn test_sp_stream_open_returns_stream_level() {
+        let xml = "<stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' to='example.com'>";
+        // Note: quick-xml may not handle the unclosed stream:stream in from_str.
+        // We test the stream wrapper via parse_xml_in_stream instead.
+        let stanzas = parse_xml_in_stream("");
+        // Should get StreamLevel for the open and StreamLevel for the close
+        assert!(stanzas.iter().any(|s| matches!(s, XmppStanza::StreamLevel)));
     }
 
     #[test]
-    fn test_extract_stream_error_stanza_incomplete() {
-        let buf = "<stream:error><conflict";
-        assert!(extract_stream_error_stanza(buf).is_none());
+    fn test_sp_stanzas_inside_stream() {
+        let stanzas = parse_xml_in_stream(
+            "<message from='a@b' to='c@d' type='chat'><body>hi</body></message>\
+             <presence from='a@b' type='unavailable'/>"
+        );
+        // Should have: StreamLevel (open), Message, Presence, StreamLevel (close)
+        let mut msgs = 0;
+        let mut pres = 0;
+        let mut stream_levels = 0;
+        for s in &stanzas {
+            match s {
+                XmppStanza::Message(_) => msgs += 1,
+                XmppStanza::Presence(_) => pres += 1,
+                XmppStanza::StreamLevel => stream_levels += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(msgs, 1);
+        assert_eq!(pres, 1);
+        assert!(stream_levels >= 2); // open + close
     }
 
     #[test]
-    fn test_extract_stream_error_stanza_not_present() {
-        let buf = "<message><body>hi</body></message>";
-        assert!(extract_stream_error_stanza(buf).is_none());
+    fn test_sp_entity_decoding_in_body() {
+        let xml = "<message from='a@b' to='c@d' type='chat'>\
+                   <body>Tom &amp; Jerry&apos;s &lt;show&gt;</body></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.body, "Tom & Jerry's <show>");
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_cdata_in_body() {
+        let xml = "<message from='a@b' to='c@d' type='chat'>\
+                   <body><![CDATA[<not a tag> & stuff]]></body></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.body, "<not a tag> & stuff");
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_real_oob_message() {
+        let xml = "<message from='user@example.com/mobile' to='bot@example.com' type='chat' id='abc123'>\
+                   <body>Can you read this ?\nhttps://upload.example.com/file.png</body>\
+                   <active xmlns='http://jabber.org/protocol/chatstates'/>\
+                   <x xmlns='jabber:x:oob'>\
+                   <url>https://upload.example.com/file.png</url>\
+                   </x>\
+                   </message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.from, "user@example.com/mobile");
+                assert!(!msg.oob.is_empty());
+                assert_eq!(msg.oob[0].url, "https://upload.example.com/file.png");
+                // Body should NOT be stripped since it contains more than just the URL
+                assert!(msg.body.contains("Can you read this"));
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_no_type_defaults_to_chat() {
+        let xml = "<message from='a@b' to='c@d'><body>hi</body></message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.message_type, MessageType::Chat);
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_presence_with_children_parsed() {
+        let xml = "<presence from='a@b'><x xmlns='vcard-temp:x:update'/><show>away</show></presence>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Presence(p) => {
+                assert_eq!(p.from, "a@b");
+                assert_eq!(p.presence_type, PresenceType::Available);
+            }
+            other => panic!("Expected Presence, got {other:?}"),
+        }
     }
 }

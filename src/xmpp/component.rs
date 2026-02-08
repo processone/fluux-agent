@@ -5,7 +5,9 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use super::stanzas::{self, IncomingMessage, IncomingPresence};
+use quick_xml::events::Event;
+
+use super::stanzas::{self, IncomingMessage, IncomingPresence, StanzaParser, XmppStanza};
 use super::XmppError;
 use crate::config::{ConnectionMode, ServerConfig};
 
@@ -194,81 +196,62 @@ impl XmppComponent {
         event_tx: mpsc::Sender<XmppEvent>,
         mut cmd_rx: mpsc::Receiver<XmppCommand>,
     ) {
-        // Read task
+        // Read task — uses quick-xml async Reader for proper XML parsing
         let event_tx_clone = event_tx.clone();
         let read_handle = tokio::spawn(async move {
-            let mut reader = reader;
-            let mut buf = vec![0u8; 65536];
-            let mut xml_buffer = String::new();
+            let buf_reader = tokio::io::BufReader::new(reader);
+            let mut xml_reader = quick_xml::Reader::from_reader(buf_reader);
+            xml_reader.config_mut().trim_text(true);
+            let mut parser = StanzaParser::new();
+            let mut buf = Vec::new();
 
             loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) => {
+                match xml_reader.read_event_into_async(&mut buf).await {
+                    Ok(Event::Eof) => {
                         warn!("XMPP connection closed by server");
                         let _ = event_tx_clone
                             .send(XmppEvent::Error("Connection closed".into()))
                             .await;
                         break;
                     }
-                    Ok(n) => {
-                        let chunk = String::from_utf8_lossy(&buf[..n]);
-                        xml_buffer.push_str(&chunk);
-
-                        // Detect stream errors (e.g. conflict, system-shutdown)
-                        if let Some((stanza, stanza_end)) =
-                            stanzas::extract_stream_error_stanza(&xml_buffer)
-                        {
-                            if let Some(condition) = stanzas::parse_stream_error(&stanza) {
-                                error!("Stream error received: {condition}");
-                                let _ = event_tx_clone
-                                    .send(XmppEvent::StreamError(condition))
-                                    .await;
+                    Ok(event) => {
+                        if let Some(stanza) = parser.feed(event) {
+                            match stanza {
+                                XmppStanza::Message(msg) => {
+                                    debug!("Received message from {}: {}", msg.from, msg.body);
+                                    let _ = event_tx_clone
+                                        .send(XmppEvent::Message(msg))
+                                        .await;
+                                }
+                                XmppStanza::Presence(pres) => {
+                                    debug!(
+                                        "Received presence from {}: {:?}",
+                                        pres.from, pres.presence_type
+                                    );
+                                    let _ = event_tx_clone
+                                        .send(XmppEvent::Presence(pres))
+                                        .await;
+                                }
+                                XmppStanza::StreamError(condition) => {
+                                    error!("Stream error received: {condition}");
+                                    let _ = event_tx_clone
+                                        .send(XmppEvent::StreamError(condition))
+                                        .await;
+                                    break;
+                                }
+                                XmppStanza::Ignored | XmppStanza::StreamLevel => {}
                             }
-                            xml_buffer = xml_buffer[stanza_end..].to_string();
-                            break; // stream errors are fatal
-                        }
-
-                        // Process all complete <message>...</message> stanzas
-                        while let Some(end) = xml_buffer.find("</message>") {
-                            let stanza_end = end + "</message>".len();
-                            let stanza = &xml_buffer[..stanza_end];
-
-                            if let Some(msg) = stanzas::parse_message(stanza) {
-                                debug!("Received message from {}: {}", msg.from, msg.body);
-                                let _ = event_tx_clone.send(XmppEvent::Message(msg)).await;
-                            } else {
-                                debug!("Skipping non-message stanza (chat state or no body)");
-                            }
-
-                            xml_buffer = xml_buffer[stanza_end..].to_string();
-                        }
-
-                        // Process all complete presence stanzas
-                        while let Some(presence) =
-                            stanzas::extract_presence_stanza(&xml_buffer)
-                        {
-                            let (stanza, stanza_end) = presence;
-
-                            if let Some(pres) = stanzas::parse_presence(&stanza) {
-                                debug!(
-                                    "Received presence from {}: {:?}",
-                                    pres.from, pres.presence_type
-                                );
-                                let _ =
-                                    event_tx_clone.send(XmppEvent::Presence(pres)).await;
-                            }
-
-                            xml_buffer = xml_buffer[stanza_end..].to_string();
                         }
                     }
                     Err(e) => {
-                        error!("Read error: {e}");
+                        error!("XML parse error: {e}");
                         let _ = event_tx_clone
-                            .send(XmppEvent::Error(e.to_string()))
+                            .send(XmppEvent::Error(format!("XML parse error: {e}")))
                             .await;
                         break;
                     }
                 }
+                buf.clear();
             }
         });
 
