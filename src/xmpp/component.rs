@@ -5,7 +5,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use super::stanzas::{self, IncomingMessage};
+use super::stanzas::{self, IncomingMessage, IncomingPresence};
 use crate::config::{ConnectionMode, ServerConfig};
 
 /// Events emitted by the XMPP layer to the runtime
@@ -13,6 +13,7 @@ use crate::config::{ConnectionMode, ServerConfig};
 pub enum XmppEvent {
     Connected,
     Message(IncomingMessage),
+    Presence(IncomingPresence),
     Error(String),
 }
 

@@ -59,7 +59,10 @@ async fn main() -> Result<()> {
     let llm = AnthropicClient::new(config.llm.clone());
 
     // Connect to XMPP server (component or C2S, based on config)
-    let (event_rx, cmd_tx) = xmpp::connect(config.server.clone()).await?;
+    let (event_rx, cmd_tx) = xmpp::connect(
+        config.server.clone(),
+        config.agent.allowed_jids.clone(),
+    ).await?;
 
     // Launch agentic runtime
     let runtime = AgentRuntime::new(config, llm, memory);

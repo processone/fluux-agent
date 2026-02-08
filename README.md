@@ -1,16 +1,20 @@
 # Fluux Agent
 
-**A personal, secure, and federated AI agent — powered by XMPP.**
+**A secure framework for open and federated AI agent networks — built on XMPP.**
 
-Fluux Agent is an AI agent runtime that connects to any XMPP server — either as an external component (XEP-0114) or as a regular client (C2S with SASL + STARTTLS). It transforms the XMPP protocol — designed for human messaging — into a communication bus for autonomous AI agents.
+Fluux Agent is the foundation for a new kind of AI infrastructure: autonomous agents that communicate over an open, federated protocol instead of walled-garden APIs. Today it's a single-agent runtime that connects to any XMPP server. Tomorrow it's a network where your agent talks to mine — across domains, across organizations — without a centralized platform controlling the conversation.
+
+This is the beginning. The runtime you see here — XMPP connectivity, conversational memory, LLM integration — is the first building block. The roadmap leads to a skills system, sandboxed execution, an agent-to-agent protocol, and ultimately **federation**: agents on different servers discovering each other, delegating tasks, and collaborating, all over standard XMPP infrastructure that has been battle-tested for 20 years.
 
 ## Why
 
-OpenClaw demonstrated the massive demand for personal AI assistants that actually act. But its architecture — Node.js bridges to every messaging platform, root system access, JSON file storage — poses fundamental security, reliability, and interoperability problems.
+OpenClaw demonstrated the massive demand for personal AI assistants that actually act. But its architecture — Node.js bridges to every messaging platform, root system access, JSON file storage — poses fundamental security, reliability, and interoperability problems. More critically, it's a closed system: agents can't talk to each other, and every integration is a bespoke bridge that the project must maintain.
 
-XMPP has solved these problems for 20 years: reliable message routing, presence, PubSub for events, message history storage (MAM), multi-device synchronization, and most importantly **federation** — the ability for agents on different servers to communicate with each other without a centralized platform.
+The AI agent ecosystem needs what email gave us for messages and the web gave us for documents: **an open protocol where any agent can reach any other agent, regardless of who hosts it.**
 
-Fluux Agent brings these two worlds together: the power of modern AI agents with the robustness of proven messaging infrastructure.
+XMPP already provides this. It has solved reliable message routing, presence, PubSub for events, message history (MAM), multi-device synchronization, and most importantly **federation** for 20 years. Billions of messages have been routed through XMPP infrastructure. The protocol is extensible by design — adding agent-specific semantics (skill discovery, task delegation, action confirmation) is exactly the kind of problem XMPP extensions were made for.
+
+Fluux Agent brings these two worlds together: the power of modern AI agents with the robustness of proven, federated messaging infrastructure.
 
 ## Architecture
 
@@ -44,14 +48,32 @@ Fluux Agent brings these two worlds together: the power of modern AI agents with
 
 ### Key Principles
 
+- **Open and federated** — Agents communicate over XMPP, an open standard with native federation. No vendor lock-in, no centralized platform. Your agent, your server, your rules.
 - **Total decoupling** — The agent is a standard XMPP component. It works with any XMPP server, not just ejabberd.
 - **Security by design** — Defense-in-depth with 5 independent layers: declarative capabilities, action validation, Wasm sandbox, kernel sandboxing (Landlock/seccomp), and process isolation. The LLM never directly touches the system. See [Security Architecture](docs/SECURITY.md).
 - **Proactivity** — Cron jobs, PubSub subscriptions, webhooks. The agent can initiate conversations, not just respond.
 - **Federation** — My agent `agent.domain-a.com` talks to your agent `agent.domain-b.com` via XMPP federation. No centralized platform.
 
+## Vision
+
+```
+Today (v0.1)                         Tomorrow (v1.0)
+
+ User ↔ Agent ↔ LLM                  User ↔ Agent A ↔ Agent B ↔ Agent C
+                                              │            │
+                                          domain-a.com  domain-b.com
+                                              │            │
+                                          ┌───┴────────────┴───┐
+                                          │  XMPP Federation   │
+                                          │  (open, standard)  │
+                                          └────────────────────┘
+```
+
+Fluux Agent starts as a personal AI assistant — one user, one agent, one LLM. But the architecture is designed from day one to scale to a federated network of agents that discover each other's skills, delegate tasks, and collaborate across organizational boundaries. The protocol layer (XMPP) already handles the hard parts: routing, presence, authentication, encryption, and federation. Fluux Agent adds the AI semantics on top.
+
 ## Status
 
-> **v0.1** — Foundation. Dual-mode XMPP connection (component + C2S), agentic loop with Claude API, persistent markdown memory, conversation sessions, and slash commands.
+> **v0.1** — Foundation. This is the beginning: dual-mode XMPP connection (component + C2S), agentic loop with Claude API, persistent markdown memory, conversation sessions, and slash commands. See the [Roadmap](ROADMAP.md) for what's next.
 
 ### Roadmap
 
@@ -252,16 +274,9 @@ The core is under [Apache License 2.0](LICENSE).
 
 Enterprise features (multi-agent federation, multi-tenant, audit, SSO) will be distributed under BSL 1.1 (automatic conversion to Apache 2.0 after 4 years).
 
-### Why Apache 2.0 for the core
-
-- **Protocol adoption** — For XMPP to become the standard for AI agents, the reference runtime must be frictionless. AGPL blocks integration in many enterprise environments.
-- **Skills ecosystem** — Skill developers shouldn't worry about license contamination.
-- **Patent protection** — Apache 2.0 includes an explicit patent grant, unlike MIT.
-- **Rust consistency** — The Rust ecosystem is culturally Apache 2.0 / MIT.
-
 ## Context
 
-Fluux Agent is developed by [ProcessOne](https://www.process-one.net), the company behind [ejabberd](https://www.ejabberd.im) — the XMPP server that powered the early versions of WhatsApp. 20 years of messaging infrastructure expertise, applied to AI agents.
+Fluux Agent is developed by [ProcessOne](https://www.process-one.net), the company behind [ejabberd](https://www.ejabberd.im) — the XMPP server that powered the early versions of WhatsApp. 20 years of messaging infrastructure expertise, now applied to building the open foundation for federated AI agent networks.
 
 ---
 

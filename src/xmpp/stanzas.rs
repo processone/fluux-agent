@@ -166,6 +166,101 @@ pub fn build_initial_presence() -> String {
     "<presence/>".to_string()
 }
 
+/// Presence subscription request — ask to see the contact's presence
+pub fn build_subscribe(to: &str) -> String {
+    format!("<presence to='{to}' type='subscribe'/>")
+}
+
+/// Accept an incoming subscription request — allow the contact to see our presence
+pub fn build_subscribed(to: &str) -> String {
+    format!("<presence to='{to}' type='subscribed'/>")
+}
+
+// ── Presence parsing ────────────────────────────────────
+
+/// The type of an incoming presence stanza
+#[derive(Debug, Clone, PartialEq)]
+pub enum PresenceType {
+    /// Contact wants to subscribe to our presence
+    Subscribe,
+    /// Contact approved our subscription request
+    Subscribed,
+    /// Contact is unsubscribing from our presence
+    Unsubscribe,
+    /// Contact revoked our subscription
+    Unsubscribed,
+    /// Contact went offline
+    Unavailable,
+    /// Contact is available (default / no type attribute)
+    Available,
+}
+
+/// Parsed incoming presence stanza
+#[derive(Debug, Clone)]
+pub struct IncomingPresence {
+    pub from: String,
+    pub presence_type: PresenceType,
+}
+
+/// Parses an incoming presence stanza from XML.
+/// Returns None if the stanza is not a presence stanza.
+pub fn parse_presence(data: &str) -> Option<IncomingPresence> {
+    if !data.contains("<presence") {
+        return None;
+    }
+
+    let from = extract_attr(data, "from")?;
+    let type_str = extract_attr(data, "type");
+
+    let presence_type = match type_str.as_deref() {
+        Some("subscribe") => PresenceType::Subscribe,
+        Some("subscribed") => PresenceType::Subscribed,
+        Some("unsubscribe") => PresenceType::Unsubscribe,
+        Some("unsubscribed") => PresenceType::Unsubscribed,
+        Some("unavailable") => PresenceType::Unavailable,
+        _ => PresenceType::Available,
+    };
+
+    Some(IncomingPresence {
+        from,
+        presence_type,
+    })
+}
+
+// ── Roster (RFC 6121) ───────────────────────────────────
+
+/// Roster query request — fetch the bot's contact list
+pub fn build_roster_get() -> String {
+    "<iq type='get' id='roster1'><query xmlns='jabber:iq:roster'/></iq>".to_string()
+}
+
+/// Extracts bare JIDs from a roster result.
+/// Parses `<item jid='user@domain' .../>` elements inside `<query xmlns='jabber:iq:roster'>`.
+/// Returns the set of bare JIDs currently in the roster.
+pub fn extract_roster_jids(data: &str) -> Vec<String> {
+    let mut jids = Vec::new();
+    let mut search_from = 0;
+
+    // Look for <item elements inside the roster query
+    while let Some(pos) = data[search_from..].find("<item ") {
+        let item_start = search_from + pos;
+        let item_data = &data[item_start..];
+
+        // Extract the jid attribute from this <item>
+        if let Some(jid) = extract_attr(item_data, "jid") {
+            // Only include items that aren't in "remove" subscription state
+            let subscription = extract_attr(item_data, "subscription");
+            if subscription.as_deref() != Some("remove") {
+                jids.push(jid);
+            }
+        }
+
+        search_from = item_start + "<item ".len();
+    }
+
+    jids
+}
+
 // ── Shared parsing helpers ───────────────────────────────
 
 /// Extracts stream id from server response
@@ -380,5 +475,262 @@ mod tests {
                    <body>  Hello agent  </body></message>";
         let msg = parse_message(xml).unwrap();
         assert_eq!(msg.body, "Hello agent");
+    }
+
+    // ── Presence tests ──────────────────────────────────
+
+    #[test]
+    fn test_build_subscribe() {
+        let xml = build_subscribe("user@localhost");
+        assert_eq!(xml, "<presence to='user@localhost' type='subscribe'/>");
+    }
+
+    #[test]
+    fn test_build_subscribed() {
+        let xml = build_subscribed("user@localhost");
+        assert_eq!(xml, "<presence to='user@localhost' type='subscribed'/>");
+    }
+
+    #[test]
+    fn test_parse_presence_subscribe() {
+        let xml = "<presence from='user@localhost' to='bot@localhost' type='subscribe'/>";
+        let pres = parse_presence(xml).unwrap();
+        assert_eq!(pres.from, "user@localhost");
+        assert_eq!(pres.presence_type, PresenceType::Subscribe);
+    }
+
+    #[test]
+    fn test_parse_presence_subscribed() {
+        let xml = "<presence from='user@localhost' to='bot@localhost' type='subscribed'/>";
+        let pres = parse_presence(xml).unwrap();
+        assert_eq!(pres.from, "user@localhost");
+        assert_eq!(pres.presence_type, PresenceType::Subscribed);
+    }
+
+    #[test]
+    fn test_parse_presence_available() {
+        // No type attribute = available
+        let xml = "<presence from='user@localhost/mobile'><show>chat</show></presence>";
+        let pres = parse_presence(xml).unwrap();
+        assert_eq!(pres.from, "user@localhost/mobile");
+        assert_eq!(pres.presence_type, PresenceType::Available);
+    }
+
+    #[test]
+    fn test_parse_presence_unavailable() {
+        let xml = "<presence from='user@localhost/res' type='unavailable'/>";
+        let pres = parse_presence(xml).unwrap();
+        assert_eq!(pres.from, "user@localhost/res");
+        assert_eq!(pres.presence_type, PresenceType::Unavailable);
+    }
+
+    #[test]
+    fn test_parse_presence_not_a_presence() {
+        let xml = "<message from='user@localhost' type='chat'><body>Hi</body></message>";
+        assert!(parse_presence(xml).is_none());
+    }
+
+    // ── Roster tests ────────────────────────────────────
+
+    #[test]
+    fn test_build_roster_get() {
+        let xml = build_roster_get();
+        assert!(xml.contains("jabber:iq:roster"));
+        assert!(xml.contains("type='get'"));
+    }
+
+    #[test]
+    fn test_extract_roster_jids() {
+        let xml = "<iq type='result' id='roster1'>\
+                   <query xmlns='jabber:iq:roster'>\
+                   <item jid='alice@localhost' subscription='both'/>\
+                   <item jid='bob@localhost' subscription='to'/>\
+                   </query></iq>";
+        let jids = extract_roster_jids(xml);
+        assert_eq!(jids, vec!["alice@localhost", "bob@localhost"]);
+    }
+
+    #[test]
+    fn test_extract_roster_jids_empty() {
+        let xml = "<iq type='result' id='roster1'>\
+                   <query xmlns='jabber:iq:roster'/></iq>";
+        let jids = extract_roster_jids(xml);
+        assert!(jids.is_empty());
+    }
+
+    #[test]
+    fn test_extract_roster_jids_skips_removed() {
+        let xml = "<iq type='result' id='roster1'>\
+                   <query xmlns='jabber:iq:roster'>\
+                   <item jid='alice@localhost' subscription='both'/>\
+                   <item jid='removed@localhost' subscription='remove'/>\
+                   </query></iq>";
+        let jids = extract_roster_jids(xml);
+        assert_eq!(jids, vec!["alice@localhost"]);
+    }
+
+    // ── Component protocol stanza tests ─────────────────
+
+    #[test]
+    fn test_build_stream_open() {
+        let xml = build_stream_open("agent.localhost");
+        assert!(xml.contains("xmlns='jabber:component:accept'"));
+        assert!(xml.contains("to='agent.localhost'"));
+    }
+
+    #[test]
+    fn test_build_handshake() {
+        let xml = build_handshake("abc123hash");
+        assert_eq!(xml, "<handshake>abc123hash</handshake>");
+    }
+
+    #[test]
+    fn test_is_handshake_success() {
+        assert!(is_handshake_success("<handshake/>"));
+        assert!(is_handshake_success("<handshake></handshake>"));
+        assert!(!is_handshake_success("<error/>"));
+    }
+
+    // ── C2S protocol stanza tests ───────────────────────
+
+    #[test]
+    fn test_build_starttls() {
+        let xml = build_starttls();
+        assert!(xml.contains("urn:ietf:params:xml:ns:xmpp-tls"));
+    }
+
+    #[test]
+    fn test_is_starttls_proceed() {
+        assert!(is_starttls_proceed("<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>"));
+        assert!(!is_starttls_proceed("<failure/>"));
+    }
+
+    #[test]
+    fn test_has_starttls() {
+        let features = "<stream:features><starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/></stream:features>";
+        assert!(has_starttls(features));
+        assert!(!has_starttls("<stream:features></stream:features>"));
+    }
+
+    #[test]
+    fn test_build_sasl_auth_plain() {
+        let xml = build_sasl_auth_plain("bot", "secret");
+        assert!(xml.contains("mechanism='PLAIN'"));
+        assert!(xml.contains("urn:ietf:params:xml:ns:xmpp-sasl"));
+        // PLAIN payload is base64(\0bot\0secret)
+        use base64::Engine;
+        let expected = base64::engine::general_purpose::STANDARD.encode("\0bot\0secret");
+        assert!(xml.contains(&expected));
+    }
+
+    #[test]
+    fn test_is_sasl_success() {
+        assert!(is_sasl_success("<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>"));
+        assert!(!is_sasl_success("<failure/>"));
+    }
+
+    #[test]
+    fn test_is_sasl_challenge() {
+        assert!(is_sasl_challenge("<challenge xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>data</challenge>"));
+        assert!(!is_sasl_challenge("<success/>"));
+    }
+
+    #[test]
+    fn test_build_bind_request() {
+        let xml = build_bind_request("fluux-agent");
+        assert!(xml.contains("urn:ietf:params:xml:ns:xmpp-bind"));
+        assert!(xml.contains("<resource>fluux-agent</resource>"));
+        assert!(xml.contains("type='set'"));
+    }
+
+    #[test]
+    fn test_build_initial_presence() {
+        assert_eq!(build_initial_presence(), "<presence/>");
+    }
+
+    // ── Helper function tests ───────────────────────────
+
+    #[test]
+    fn test_extract_attr_single_quotes() {
+        let xml = "<message from='user@localhost' to='bot@localhost'>";
+        assert_eq!(extract_attr(xml, "from"), Some("user@localhost".to_string()));
+        assert_eq!(extract_attr(xml, "to"), Some("bot@localhost".to_string()));
+    }
+
+    #[test]
+    fn test_extract_attr_double_quotes() {
+        let xml = r#"<message from="user@localhost" type="chat">"#;
+        assert_eq!(extract_attr(xml, "from"), Some("user@localhost".to_string()));
+        assert_eq!(extract_attr(xml, "type"), Some("chat".to_string()));
+    }
+
+    #[test]
+    fn test_extract_attr_missing() {
+        let xml = "<message from='user@localhost'>";
+        assert_eq!(extract_attr(xml, "id"), None);
+    }
+
+    #[test]
+    fn test_extract_element_text_found() {
+        let xml = "<iq><jid>bot@localhost/res</jid></iq>";
+        assert_eq!(
+            extract_element_text(xml, "jid"),
+            Some("bot@localhost/res".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_element_text_empty() {
+        let xml = "<iq><jid></jid></iq>";
+        assert_eq!(extract_element_text(xml, "jid"), None);
+    }
+
+    #[test]
+    fn test_extract_element_text_missing() {
+        let xml = "<iq><bind/></iq>";
+        assert_eq!(extract_element_text(xml, "jid"), None);
+    }
+
+    #[test]
+    fn test_parse_message_extracts_all_fields() {
+        let xml = "<message from='user@localhost/res' to='agent.localhost' type='chat' id='msg42'>\
+                   <body>Test message</body></message>";
+        let msg = parse_message(xml).unwrap();
+        assert_eq!(msg.from, "user@localhost/res");
+        assert_eq!(msg.to, "agent.localhost");
+        assert_eq!(msg.body, "Test message");
+        assert_eq!(msg.id, Some("msg42".to_string()));
+    }
+
+    #[test]
+    fn test_parse_message_without_id() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <body>No ID here</body></message>";
+        let msg = parse_message(xml).unwrap();
+        assert_eq!(msg.id, None);
+    }
+
+    #[test]
+    fn test_parse_message_no_message_tag() {
+        let xml = "<iq type='result'><query/></iq>";
+        assert!(parse_message(xml).is_none());
+    }
+
+    #[test]
+    fn test_chat_state_gone_filtered() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <gone xmlns='http://jabber.org/protocol/chatstates'/>\
+                   </message>";
+        assert!(is_chat_state_notification(xml));
+        assert!(parse_message(xml).is_none());
+    }
+
+    #[test]
+    fn test_chat_state_inactive_filtered() {
+        let xml = "<message from='user@localhost/res' to='bot@localhost' type='chat'>\
+                   <inactive xmlns='http://jabber.org/protocol/chatstates'/>\
+                   </message>";
+        assert!(is_chat_state_notification(xml));
+        assert!(parse_message(xml).is_none());
     }
 }

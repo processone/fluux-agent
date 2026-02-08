@@ -22,8 +22,9 @@ The minimum viable agent: connect, authenticate, converse, remember.
 
 - [x] Conversation sessions (`/new`, `/reset`, session archival)
 - [x] Slash commands (runtime-intercepted, never reach the LLM)
-- [ ] Presence subscription for allowed JIDs — **next**
-- [ ] Cross-domain message rejection (security default)
+- [x] Presence subscription for allowed JIDs (auto-subscribe + auto-accept)
+- [ ] Cross-domain message rejection (security default) — **next**
+- [ ] Typing indicators (outbound `<composing/>` while LLM is generating)
 - [ ] Reconnection with exponential backoff
 
 ### Conversation sessions ✓
@@ -41,15 +42,20 @@ Implemented: the agent supports discrete sessions per user.
 - **Session timeout** — If no message is received for a configurable duration (e.g. 4 hours), the next message implicitly starts a new session. The timeout is per-user.
 - **Session context carry-over** — When a new session starts, the agent can optionally summarize the previous session into `context.md`, giving continuity without sending the full old history to the LLM.
 
-### Presence subscription for allowed JIDs (roster management)
+### Presence subscription for allowed JIDs ✓
 
-When the agent starts and connects in C2S mode:
+Implemented: automatic roster integration in C2S mode.
 
-- For each JID in `allowed_jids`, send a presence subscription request (`<presence type='subscribe'>`) if not already subscribed.
-- Auto-accept incoming subscription requests from allowed JIDs (`<presence type='subscribed'>`).
-- Ignore or reject subscription requests from JIDs not in the allow list.
-- This gives the agent proper roster integration — allowed users see the agent as online in their contact list.
-- In component mode, the server typically handles routing differently, so this is primarily a C2S concern.
+- **Proactive subscribe on connect** — After initial presence, the agent sends `<presence type='subscribe'>` to every JID in `allowed_jids`. Allowed users see the agent appear in their contact list.
+- **Auto-accept incoming subscriptions** — When an allowed JID requests to subscribe, the runtime responds with `<presence type='subscribed'>` automatically. Unauthorized subscription requests are silently ignored.
+- **Presence tracking** — The read loop parses all `<presence>` stanzas (available, unavailable, subscribe, subscribed, unsubscribe, unsubscribed) and dispatches them as `XmppEvent::Presence` to the runtime.
+- **C2S only** — In component mode, the server handles routing differently. Presence subscription is a C2S concern.
+
+### Typing indicators (outbound)
+
+Send `<composing xmlns='http://jabber.org/protocol/chatstates'/>` while the LLM is generating a response, and `<active xmlns='http://jabber.org/protocol/chatstates'/>` when the response is sent. This gives users visual feedback that the agent is "thinking" — the same UX as a human typing in a chat app.
+
+Implementation: wrap the LLM call in runtime.rs with chat state stanzas sent via `XmppCommand::SendRaw`.
 
 ### Cross-domain message rejection
 
@@ -379,10 +385,29 @@ The provider prefix (`anthropic:`, `ollama:`) in the tier string tells the runti
 
 The agent initiates, not just responds.
 
+- [ ] React to user presence changes (e.g., greet on login, trigger deferred tasks when user comes online)
+- [ ] React to user PEP events (XEP-0163) — mood, activity, tune, location, avatar changes
 - [ ] Cron-based scheduled tasks (via PubSub or internal scheduler)
 - [ ] Heartbeat / keepalive for long-lived connections
 - [ ] Webhook ingestion — external events trigger agent actions
 - [ ] PubSub subscription — agent reacts to XMPP PubSub events
+
+### Presence-based proactivity
+
+The agent already tracks presence events (available/unavailable) for allowed JIDs. In v0.3, the runtime can **act on** these events instead of just logging them:
+
+- **Greeting on login** — When a user comes online, the agent can send a welcome message, daily summary, or pending notifications.
+- **Deferred task delivery** — If the agent completes a background task while the user is offline, it queues the result and delivers it when the user's presence changes to `available`.
+- **Offline cleanup** — When a user goes offline, the agent can archive the session or save context.
+- **Configurable triggers** — Not all presence changes should trigger actions. A TOML config controls which events fire which behaviors, so operators can disable greetings or limit proactivity.
+
+### PEP event reactions (XEP-0163)
+
+XMPP Personal Eventing Protocol (PEP) lets users publish rich status information: mood (XEP-0107), user activity (XEP-0108), user tune (XEP-0118), geolocation (XEP-0080), avatar changes (XEP-0084). The agent can subscribe to these events and use them as contextual signals:
+
+- **Context enrichment** — If a user publishes "mood: stressed", the agent can adjust its tone. If "activity: on the phone", it can defer non-urgent messages.
+- **Proactive suggestions** — Location changes could trigger travel-related reminders. Activity changes could prompt relevant information.
+- **Privacy-first** — PEP events are only processed for allowed JIDs. The agent never stores or forwards PEP data to third parties. PEP subscription is opt-in via config.
 
 ---
 
@@ -469,6 +494,14 @@ Support receiving and sending files via XMPP:
 - **Sending attachments** — The agent can generate and send files back to the user: skill execution results as CSV, generated images, exported data. Uses XEP-0363 (HTTP File Upload) to upload to the server's HTTP upload service, then sends the URL in a message with an `<x xmlns='jabber:x:oob'>` out-of-band reference.
 - **Security** — File downloads must respect size limits, content-type validation, and sandbox restrictions. Files are stored temporarily and cleaned up after processing.
 
-### Typing indicators (outbound)
+### Team memory via MUC (Multi-User Chat)
 
-Send `<composing/>` while the LLM is generating a response, and `<active/>` when the response is sent. This gives users visual feedback that the agent is "thinking".
+Today the agent has per-user memory (1:1 conversations). For team use, the agent could join XMPP chat rooms (MUC, XEP-0045) and maintain **shared team memory** alongside individual user memory:
+
+- **Personal memory** — `{jid}/history.md` + `{jid}/context.md` — what the agent knows about each individual user. Private, per-user.
+- **Team memory** — `{room_jid}/history.md` + `{room_jid}/context.md` — shared context from group conversations. The agent participates in the room, observes discussions, and builds team-level context (project names, decisions, recurring topics).
+- **Memory scoping** — When responding in a MUC, the agent uses the room's shared context. When responding in a 1:1 chat, it uses the user's personal context. If the user is also in a team room, the agent could optionally blend both.
+- **Use cases** — Team standup assistant, project knowledge base, shared action tracking, meeting summaries posted to the room.
+- **XMPP integration** — The agent joins rooms as a participant. Room history (via MAM or MUC history) provides bootstrap context. Presence in the room is automatic.
+
+**Open question:** Should team memory be opt-in per room (configured in TOML), or should the agent join any room it's invited to? For security, explicit configuration is safer — but an `/invite` workflow could work for trusted domains.

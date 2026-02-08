@@ -18,11 +18,22 @@ use crate::config::{ConnectionMode, ServerConfig};
 
 pub struct XmppClient {
     config: ServerConfig,
+    /// JIDs to subscribe to after connecting (presence whitelist)
+    allowed_jids: Vec<String>,
 }
 
 impl XmppClient {
     pub fn new(config: ServerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            allowed_jids: Vec::new(),
+        }
+    }
+
+    /// Set the list of allowed JIDs for automatic presence subscription
+    pub fn with_allowed_jids(mut self, jids: Vec<String>) -> Self {
+        self.allowed_jids = jids;
+        self
     }
 
     /// Same interface as XmppComponent::connect()
@@ -146,17 +157,52 @@ impl XmppClient {
             .ok_or_else(|| anyhow!("Failed to bind resource: {bind_response}"))?;
         info!("Bound as: {full_jid}");
 
-        // --- Phase 7: Send initial presence ---
+        // --- Phase 7: Fetch roster ---
+        tls_stream
+            .write_all(stanzas::build_roster_get().as_bytes())
+            .await?;
+        debug!("Sent roster request");
+
+        let roster_response = read_until(&mut tls_stream, "</iq>").await?;
+        let roster_jids = stanzas::extract_roster_jids(&roster_response);
+        info!("Roster contains {} contact(s)", roster_jids.len());
+        for jid in &roster_jids {
+            debug!("  roster: {jid}");
+        }
+
+        // --- Phase 8: Send initial presence ---
         tls_stream
             .write_all(stanzas::build_initial_presence().as_bytes())
             .await?;
         info!("Sent initial presence");
 
+        // --- Phase 9: Subscribe to allowed JIDs not already in roster ---
+        let mut subscribed_count = 0;
+        for jid in &self.allowed_jids {
+            if jid == "*" {
+                continue; // wildcard is not a real JID
+            }
+            if roster_jids.iter().any(|r| r == jid) {
+                debug!("Already in roster, skipping subscribe: {jid}");
+                continue;
+            }
+            let subscribe = stanzas::build_subscribe(jid);
+            tls_stream.write_all(subscribe.as_bytes()).await?;
+            debug!("Sent presence subscribe to {jid}");
+            subscribed_count += 1;
+        }
+        if subscribed_count > 0 {
+            info!("Sent {subscribed_count} new presence subscription(s)");
+        } else {
+            info!("All allowed JIDs already in roster — no new subscriptions needed");
+        }
+
         let _ = event_tx.send(XmppEvent::Connected).await;
 
-        // --- Phase 8: Main read/write loop ---
+        // --- Phase 10: Main read/write loop ---
+        let allowed_jids = self.allowed_jids.clone();
         let (reader, writer) = split(tls_stream);
-        Self::run_event_loop(reader, writer, event_tx, cmd_rx).await
+        Self::run_event_loop(reader, writer, event_tx, cmd_rx, allowed_jids).await
     }
 
     /// Main read/write loop — same pattern as component.rs
@@ -165,6 +211,7 @@ impl XmppClient {
         writer: W,
         event_tx: mpsc::Sender<XmppEvent>,
         mut cmd_rx: mpsc::Receiver<XmppCommand>,
+        allowed_jids: Vec<String>,
     ) -> Result<()>
     where
         R: AsyncReadExt + Unpin + Send + 'static,
@@ -204,6 +251,18 @@ impl XmppClient {
 
                             xml_buffer = xml_buffer[stanza_end..].to_string();
                         }
+
+                        // Process all complete <presence ... /> or <presence>...</presence> stanzas
+                        while let Some(presence) = Self::extract_presence(&xml_buffer) {
+                            let (stanza, stanza_end) = presence;
+
+                            if let Some(pres) = stanzas::parse_presence(&stanza) {
+                                debug!("Received presence from {}: {:?}", pres.from, pres.presence_type);
+                                let _ = event_tx_clone.send(XmppEvent::Presence(pres)).await;
+                            }
+
+                            xml_buffer = xml_buffer[stanza_end..].to_string();
+                        }
                     }
                     Err(e) => {
                         error!("Read error: {e}");
@@ -217,6 +276,7 @@ impl XmppClient {
         });
 
         // Write task — C2S: no 'from' attribute (server adds it)
+        let _allowed_jids = allowed_jids;
         let write_handle = tokio::spawn(async move {
             let mut writer = writer;
             while let Some(cmd) = cmd_rx.recv().await {
@@ -241,6 +301,34 @@ impl XmppClient {
         }
 
         Ok(())
+    }
+}
+
+impl XmppClient {
+    /// Extracts a complete presence stanza from the buffer.
+    /// Handles both self-closing `<presence ... />` and `<presence>...</presence>`.
+    /// Returns (stanza_text, end_position) or None.
+    fn extract_presence(buffer: &str) -> Option<(String, usize)> {
+        let start = buffer.find("<presence")?;
+        let after_tag = &buffer[start..];
+
+        // Check for self-closing first: <presence ... />
+        if let Some(close_pos) = after_tag.find("/>") {
+            // Make sure there's no </presence> before the />
+            let has_full_close = after_tag[..close_pos].contains("</presence>");
+            if !has_full_close {
+                let stanza_end = start + close_pos + "/>".len();
+                return Some((buffer[start..stanza_end].to_string(), stanza_end));
+            }
+        }
+
+        // Full closing tag: <presence>...</presence>
+        if let Some(close_pos) = after_tag.find("</presence>") {
+            let stanza_end = start + close_pos + "</presence>".len();
+            return Some((buffer[start..stanza_end].to_string(), stanza_end));
+        }
+
+        None // incomplete stanza
     }
 }
 
@@ -273,5 +361,69 @@ async fn read_until<S: AsyncReadExt + Unpin>(
         if accumulated.contains(marker) {
             return Ok(accumulated);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── extract_presence tests ──────────────────────────
+
+    #[test]
+    fn test_extract_presence_self_closing() {
+        let buf = "<presence from='user@localhost' type='subscribe'/>";
+        let (stanza, end) = XmppClient::extract_presence(buf).unwrap();
+        assert_eq!(stanza, buf);
+        assert_eq!(end, buf.len());
+    }
+
+    #[test]
+    fn test_extract_presence_full_closing_tag() {
+        let buf = "<presence from='user@localhost/res'><show>chat</show></presence>";
+        let (stanza, end) = XmppClient::extract_presence(buf).unwrap();
+        assert_eq!(stanza, buf);
+        assert_eq!(end, buf.len());
+    }
+
+    #[test]
+    fn test_extract_presence_with_trailing_data() {
+        let buf = "<presence from='u@l' type='subscribed'/>some trailing data";
+        let (stanza, end) = XmppClient::extract_presence(buf).unwrap();
+        assert_eq!(stanza, "<presence from='u@l' type='subscribed'/>");
+        assert!(end < buf.len()); // trailing data is not consumed
+    }
+
+    #[test]
+    fn test_extract_presence_incomplete_returns_none() {
+        let buf = "<presence from='user@localhost' type='sub";
+        assert!(XmppClient::extract_presence(buf).is_none());
+    }
+
+    #[test]
+    fn test_extract_presence_no_presence_returns_none() {
+        let buf = "<message from='user@localhost'><body>Hi</body></message>";
+        assert!(XmppClient::extract_presence(buf).is_none());
+    }
+
+    #[test]
+    fn test_extract_presence_preceded_by_other_stanzas() {
+        let buf = "<iq type='result'/><presence from='u@l' type='available'/>";
+        let (stanza, _end) = XmppClient::extract_presence(buf).unwrap();
+        assert_eq!(stanza, "<presence from='u@l' type='available'/>");
+    }
+
+    #[test]
+    fn test_extract_presence_full_with_child_self_closing() {
+        // A presence with <show/> inside — the /> belongs to <show/>, not <presence>
+        let buf = "<presence from='u@l'><show>away</show><status>BRB</status></presence>";
+        let (stanza, end) = XmppClient::extract_presence(buf).unwrap();
+        assert_eq!(stanza, buf);
+        assert_eq!(end, buf.len());
+    }
+
+    #[test]
+    fn test_extract_presence_empty_buffer() {
+        assert!(XmppClient::extract_presence("").is_none());
     }
 }

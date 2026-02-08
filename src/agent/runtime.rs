@@ -1,10 +1,11 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::llm::{AnthropicClient, Message};
 use crate::xmpp::component::{XmppCommand, XmppEvent};
+use crate::xmpp::stanzas::PresenceType;
 
 use super::memory::Memory;
 
@@ -78,6 +79,36 @@ impl AgentRuntime {
                                     body: format!("Sorry, an error occurred: {e}"),
                                 })
                                 .await;
+                        }
+                    }
+                }
+                XmppEvent::Presence(pres) => {
+                    let bare_jid = pres.from.split('/').next().unwrap_or(&pres.from);
+                    match pres.presence_type {
+                        PresenceType::Subscribe => {
+                            // Auto-accept subscription requests from allowed JIDs
+                            if self.config.is_allowed(&pres.from) {
+                                info!("Auto-accepting subscription from {bare_jid}");
+                                let _ = cmd_tx
+                                    .send(XmppCommand::SendRaw(
+                                        crate::xmpp::stanzas::build_subscribed(bare_jid),
+                                    ))
+                                    .await;
+                            } else {
+                                warn!("Ignoring subscription request from unauthorized JID: {bare_jid}");
+                            }
+                        }
+                        PresenceType::Subscribed => {
+                            info!("Subscription accepted by {bare_jid}");
+                        }
+                        PresenceType::Available => {
+                            debug!("{bare_jid} is now online");
+                        }
+                        PresenceType::Unavailable => {
+                            debug!("{bare_jid} went offline");
+                        }
+                        _ => {
+                            debug!("Presence from {bare_jid}: {:?}", pres.presence_type);
                         }
                     }
                 }
@@ -217,5 +248,197 @@ Commands:\n\
         }
 
         prompt
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::*;
+    use tempfile::TempDir;
+
+    /// Build a test runtime with a temporary memory directory
+    fn test_runtime() -> (AgentRuntime, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let config = Config {
+            server: ServerConfig {
+                host: "localhost".to_string(),
+                port: 5222,
+                mode: ConnectionMode::Client {
+                    jid: "bot@localhost".to_string(),
+                    password: "pass".to_string(),
+                    resource: "fluux-agent".to_string(),
+                    tls_verify: false,
+                },
+            },
+            llm: LlmConfig {
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-5-20250929".to_string(),
+                api_key: "test-key".to_string(),
+                max_tokens_per_request: 4096,
+            },
+            agent: AgentConfig {
+                name: "Test Agent".to_string(),
+                allowed_jids: vec!["admin@localhost".to_string()],
+            },
+            memory: MemoryConfig {
+                backend: "markdown".to_string(),
+                path: tmp.path().to_path_buf(),
+            },
+        };
+
+        let llm = AnthropicClient::new(config.llm.clone());
+        let memory = Memory::open(tmp.path()).unwrap();
+        let runtime = AgentRuntime::new(config, llm, memory);
+        (runtime, tmp)
+    }
+
+    // ── Slash command tests ─────────────────────────────
+
+    #[test]
+    fn test_command_ping() {
+        let (rt, _tmp) = test_runtime();
+        let result = rt.handle_command("admin@localhost/res", "/ping").unwrap();
+        assert_eq!(result, "pong");
+    }
+
+    #[test]
+    fn test_command_help_lists_all_commands() {
+        let (rt, _tmp) = test_runtime();
+        let result = rt.handle_command("admin@localhost/res", "/help").unwrap();
+        assert!(result.contains("/new"));
+        assert!(result.contains("/forget"));
+        assert!(result.contains("/status"));
+        assert!(result.contains("/ping"));
+        assert!(result.contains("/help"));
+    }
+
+    #[test]
+    fn test_command_unknown() {
+        let (rt, _tmp) = test_runtime();
+        let result = rt.handle_command("admin@localhost", "/foobar").unwrap();
+        assert!(result.contains("Unknown command"));
+        assert!(result.contains("/foobar"));
+    }
+
+    #[test]
+    fn test_command_case_insensitive() {
+        let (rt, _tmp) = test_runtime();
+        assert_eq!(
+            rt.handle_command("admin@localhost", "/PING").unwrap(),
+            "pong"
+        );
+        assert_eq!(
+            rt.handle_command("admin@localhost", "/Ping").unwrap(),
+            "pong"
+        );
+    }
+
+    #[test]
+    fn test_command_new_empty_session() {
+        let (rt, _tmp) = test_runtime();
+        let result = rt.handle_command("admin@localhost/res", "/new").unwrap();
+        // No history → should report nothing to archive
+        assert!(
+            result.to_lowercase().contains("no active session")
+                || result.to_lowercase().contains("no session")
+                || result.to_lowercase().contains("nothing")
+        );
+    }
+
+    #[test]
+    fn test_command_new_archives_session() {
+        let (rt, _tmp) = test_runtime();
+        rt.memory.store_message("admin@localhost", "user", "Hello").unwrap();
+        rt.memory.store_message("admin@localhost", "assistant", "Hi!").unwrap();
+
+        let result = rt.handle_command("admin@localhost/res", "/new").unwrap();
+        assert!(result.to_lowercase().contains("archived") || result.to_lowercase().contains("session"));
+
+        // History should be empty after /new
+        let history = rt.memory.get_history("admin@localhost", 20).unwrap();
+        assert!(history.is_empty());
+
+        // Archived session count should be 1
+        assert_eq!(rt.memory.session_count("admin@localhost").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_command_reset_is_alias_for_new() {
+        let (rt, _tmp) = test_runtime();
+        rt.memory.store_message("admin@localhost", "user", "Test").unwrap();
+
+        let result = rt.handle_command("admin@localhost", "/reset").unwrap();
+        assert!(result.to_lowercase().contains("archived") || result.to_lowercase().contains("session"));
+    }
+
+    #[test]
+    fn test_command_forget_clears_memory() {
+        let (rt, _tmp) = test_runtime();
+        rt.memory.store_message("admin@localhost", "user", "Hello").unwrap();
+        rt.memory.set_user_context("admin@localhost", "Likes Rust").unwrap();
+
+        let _result = rt.handle_command("admin@localhost/res", "/forget").unwrap();
+
+        // Both history and context should be gone
+        let history = rt.memory.get_history("admin@localhost", 20).unwrap();
+        assert!(history.is_empty());
+        assert!(rt.memory.get_user_context("admin@localhost").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_command_status_content() {
+        let (rt, _tmp) = test_runtime();
+        rt.memory.store_message("admin@localhost", "user", "Hi").unwrap();
+
+        let result = rt.handle_command("admin@localhost/res", "/status").unwrap();
+        assert!(result.contains("Test Agent"));
+        assert!(result.contains("Uptime:"));
+        assert!(result.contains("C2S client"));
+        assert!(result.contains("anthropic"));
+        assert!(result.contains("1 messages"));
+        assert!(result.contains("User context: none"));
+    }
+
+    #[test]
+    fn test_command_status_with_context() {
+        let (rt, _tmp) = test_runtime();
+        rt.memory.set_user_context("admin@localhost", "Developer").unwrap();
+
+        let result = rt.handle_command("admin@localhost/res", "/status").unwrap();
+        assert!(result.contains("User context: yes"));
+    }
+
+    #[test]
+    fn test_command_strips_resource_from_jid() {
+        let (rt, _tmp) = test_runtime();
+        rt.memory.store_message("admin@localhost", "user", "Hi").unwrap();
+
+        // Command from full JID with resource should see the bare JID's messages
+        let result = rt
+            .handle_command("admin@localhost/Conversations.xyz", "/status")
+            .unwrap();
+        assert!(result.contains("1 messages"));
+    }
+
+    // ── System prompt tests ─────────────────────────────
+
+    #[test]
+    fn test_build_system_prompt_without_context() {
+        let (rt, _tmp) = test_runtime();
+        let prompt = rt.build_system_prompt(None);
+        assert!(prompt.contains("Test Agent"));
+        assert!(prompt.contains("XMPP"));
+        assert!(!prompt.contains("Context about this user"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_with_context() {
+        let (rt, _tmp) = test_runtime();
+        let prompt = rt.build_system_prompt(Some("Prefers French. Works at Acme Corp."));
+        assert!(prompt.contains("Test Agent"));
+        assert!(prompt.contains("Context about this user"));
+        assert!(prompt.contains("Prefers French"));
+        assert!(prompt.contains("Acme Corp"));
     }
 }

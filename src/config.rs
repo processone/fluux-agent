@@ -115,3 +115,115 @@ impl Config {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to build a Config with specific allowed_jids
+    fn config_with_jids(jids: Vec<&str>) -> Config {
+        Config {
+            server: ServerConfig {
+                host: "localhost".to_string(),
+                port: 5222,
+                mode: ConnectionMode::Client {
+                    jid: "bot@localhost".to_string(),
+                    password: "pass".to_string(),
+                    resource: "fluux-agent".to_string(),
+                    tls_verify: false,
+                },
+            },
+            llm: LlmConfig {
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-5-20250929".to_string(),
+                api_key: "test-key".to_string(),
+                max_tokens_per_request: 4096,
+            },
+            agent: AgentConfig {
+                name: "Test Agent".to_string(),
+                allowed_jids: jids.into_iter().map(String::from).collect(),
+            },
+            memory: MemoryConfig {
+                backend: "markdown".to_string(),
+                path: PathBuf::from("./data/memory"),
+            },
+        }
+    }
+
+    // ── is_allowed tests ────────────────────────────────
+
+    #[test]
+    fn test_is_allowed_bare_jid() {
+        let config = config_with_jids(vec!["admin@localhost"]);
+        assert!(config.is_allowed("admin@localhost"));
+    }
+
+    #[test]
+    fn test_is_allowed_full_jid_strips_resource() {
+        let config = config_with_jids(vec!["admin@localhost"]);
+        assert!(config.is_allowed("admin@localhost/mobile"));
+        assert!(config.is_allowed("admin@localhost/Conversations.abc123"));
+    }
+
+    #[test]
+    fn test_is_allowed_rejects_unauthorized() {
+        let config = config_with_jids(vec!["admin@localhost"]);
+        assert!(!config.is_allowed("hacker@evil.com"));
+        assert!(!config.is_allowed("hacker@evil.com/res"));
+    }
+
+    #[test]
+    fn test_is_allowed_wildcard() {
+        let config = config_with_jids(vec!["*"]);
+        assert!(config.is_allowed("anyone@anywhere.com"));
+        assert!(config.is_allowed("user@domain.org/res"));
+    }
+
+    #[test]
+    fn test_is_allowed_multiple_jids() {
+        let config = config_with_jids(vec!["alice@localhost", "bob@localhost"]);
+        assert!(config.is_allowed("alice@localhost"));
+        assert!(config.is_allowed("bob@localhost/phone"));
+        assert!(!config.is_allowed("charlie@localhost"));
+    }
+
+    #[test]
+    fn test_is_allowed_empty_list_rejects_all() {
+        let config = config_with_jids(vec![]);
+        assert!(!config.is_allowed("admin@localhost"));
+    }
+
+    #[test]
+    fn test_is_allowed_different_domain() {
+        let config = config_with_jids(vec!["admin@localhost"]);
+        // Same username, different domain → rejected
+        assert!(!config.is_allowed("admin@otherdomain.com"));
+    }
+
+    // ── mode_description tests ──────────────────────────
+
+    #[test]
+    fn test_mode_description_client() {
+        let config = config_with_jids(vec![]);
+        assert_eq!(
+            config.server.mode_description(),
+            "C2S client (bot@localhost)"
+        );
+    }
+
+    #[test]
+    fn test_mode_description_component() {
+        let server = ServerConfig {
+            host: "localhost".to_string(),
+            port: 5275,
+            mode: ConnectionMode::Component {
+                component_domain: "agent.localhost".to_string(),
+                component_secret: "secret".to_string(),
+            },
+        };
+        assert_eq!(
+            server.mode_description(),
+            "component (agent.localhost)"
+        );
+    }
+}
