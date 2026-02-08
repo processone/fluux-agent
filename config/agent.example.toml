@@ -27,7 +27,7 @@ component_secret = "${AGENT_SECRET}"
 # LLM provider (only "anthropic" is supported in v0.1)
 provider = "anthropic"
 # Model to use
-model = "claude-sonnet-4-5-20250929"
+model = "claude-haiku-4-5-20250110"
 # API key (use an environment variable!)
 api_key = "${ANTHROPIC_API_KEY}"
 # Max tokens per request

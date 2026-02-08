@@ -198,7 +198,7 @@ mod tests {
             },
             llm: LlmConfig {
                 provider: "anthropic".to_string(),
-                model: "claude-sonnet-4-5-20250929".to_string(),
+                model: "claude-haiku-4-5-20250110".to_string(),
                 api_key: "test-key".to_string(),
                 max_tokens_per_request: 4096,
             },
