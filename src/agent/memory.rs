@@ -39,6 +39,30 @@ impl Memory {
     pub fn open(path: &Path) -> Result<Self> {
         fs::create_dir_all(path)?;
         info!("Memory store opened at {}", path.display());
+
+        // Log workspace file discovery
+        let global_files = ["instructions.md", "identity.md", "personality.md"];
+        let found: Vec<&str> = global_files
+            .iter()
+            .filter(|f| path.join(f).exists() && fs::read_to_string(path.join(f)).map(|c| !c.trim().is_empty()).unwrap_or(false))
+            .copied()
+            .collect();
+
+        if found.is_empty() {
+            info!("Workspace: no global files found (instructions.md, identity.md, personality.md) — using default prompt");
+        } else {
+            let missing: Vec<&str> = global_files
+                .iter()
+                .filter(|f| !found.contains(f))
+                .copied()
+                .collect();
+            if missing.is_empty() {
+                info!("Workspace: loaded {}", found.join(", "));
+            } else {
+                info!("Workspace: loaded {} ({} not found)", found.join(", "), missing.join(", "));
+            }
+        }
+
         Ok(Self {
             base_path: path.to_path_buf(),
         })

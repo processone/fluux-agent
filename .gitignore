@@ -1,8 +1,11 @@
 # Build artifacts
 /target
 
-# Agent runtime data (memory, sessions)
-/data
+# Agent runtime data (memory, sessions, user profiles)
+/data/*
+!/data/memory/
+/data/memory/*
+!/data/memory/README.md
 
 # Local config (contains secrets via env vars)
 config/agent.toml

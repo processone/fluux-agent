@@ -212,6 +212,8 @@ data/memory/
 
 Global workspace files (`instructions.md`, `identity.md`, `personality.md`) are shared across all users and let admins customize the agent without touching code. When no workspace files exist, a built-in default prompt is used. Per-JID directories are strictly isolated — each user (or room) has their own `user.md`, `memory.md`, and conversation history.
 
+See [`data/memory/README.md`](data/memory/README.md) for the full workspace reference, file format details, and OpenClaw migration guide.
+
 ## Project Structure
 
 ```
