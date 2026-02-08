@@ -150,8 +150,7 @@ impl Config {
 
     /// Checks if a JID is allowed to talk to the agent
     pub fn is_allowed(&self, jid: &str) -> bool {
-        // Extract bare JID (without resource)
-        let bare = jid.split('/').next().unwrap_or(jid);
+        let bare = crate::xmpp::stanzas::bare_jid(jid);
         self.agent.allowed_jids.iter().any(|allowed| {
             allowed == bare || allowed == "*"
         })
@@ -163,8 +162,7 @@ impl Config {
     /// is accepted. If `allowed_domains` contains `"*"`, all domains pass.
     /// Otherwise, the sender's domain must be in the list.
     pub fn is_domain_allowed(&self, jid: &str) -> bool {
-        // Extract domain from the JID (bare or full)
-        let bare = jid.split('/').next().unwrap_or(jid);
+        let bare = crate::xmpp::stanzas::bare_jid(jid);
         let sender_domain = bare.split('@').nth(1).unwrap_or(bare);
 
         if self.agent.allowed_domains.is_empty() {

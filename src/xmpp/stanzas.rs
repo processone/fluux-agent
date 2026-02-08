@@ -415,6 +415,49 @@ pub fn extract_attr(xml: &str, attr: &str) -> Option<String> {
     None
 }
 
+/// Extracts the bare JID (without resource) from a full or bare JID.
+///
+/// - `"user@localhost/mobile"` → `"user@localhost"`
+/// - `"user@localhost"` → `"user@localhost"`
+/// - `"localhost"` → `"localhost"` (domain-only)
+pub fn bare_jid(jid: &str) -> &str {
+    jid.split('/').next().unwrap_or(jid)
+}
+
+/// Extracts a complete presence stanza from the XML buffer.
+/// Handles both self-closing `<presence ... />` and `<presence>...</presence>`.
+/// Returns `(stanza_text, end_position)` or `None` if the stanza is incomplete.
+pub fn extract_presence_stanza(buffer: &str) -> Option<(String, usize)> {
+    let start = buffer.find("<presence")?;
+    let after_tag = &buffer[start..];
+
+    // Check for self-closing first: <presence ... />
+    // A self-closing tag has /> before any > that opens the tag body.
+    // e.g. <presence from='u@l' type='subscribe'/>
+    // vs   <presence from='u@l'><x xmlns='muc'/></presence>
+    if let Some(close_pos) = after_tag.find("/>") {
+        // Check if there's a plain '>' before the '/>' — that would mean the
+        // <presence> tag body was opened and the /> belongs to a child element.
+        let before_close = &after_tag[..close_pos];
+        let tag_opened = before_close
+            .find('>')
+            .map(|pos| !before_close[..pos + 1].ends_with("/>"))
+            .unwrap_or(false);
+        if !tag_opened {
+            let stanza_end = start + close_pos + "/>".len();
+            return Some((buffer[start..stanza_end].to_string(), stanza_end));
+        }
+    }
+
+    // Full closing tag: <presence>...</presence>
+    if let Some(close_pos) = after_tag.find("</presence>") {
+        let stanza_end = start + close_pos + "</presence>".len();
+        return Some((buffer[start..stanza_end].to_string(), stanza_end));
+    }
+
+    None // incomplete stanza
+}
+
 /// Extracts text between <tag> and </tag>
 pub fn extract_element_text(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
@@ -973,5 +1016,102 @@ mod tests {
         let msg = parse_message(xml).unwrap();
         assert_eq!(msg.message_type, MessageType::GroupChat);
         assert_eq!(msg.body, "Hello room!");
+    }
+
+    // ── bare_jid tests ─────────────────────────────────
+
+    #[test]
+    fn test_bare_jid_full_jid() {
+        assert_eq!(bare_jid("user@localhost/mobile"), "user@localhost");
+    }
+
+    #[test]
+    fn test_bare_jid_already_bare() {
+        assert_eq!(bare_jid("user@localhost"), "user@localhost");
+    }
+
+    #[test]
+    fn test_bare_jid_domain_only() {
+        assert_eq!(bare_jid("localhost"), "localhost");
+    }
+
+    #[test]
+    fn test_bare_jid_long_resource() {
+        assert_eq!(
+            bare_jid("admin@localhost/Conversations.abc123"),
+            "admin@localhost"
+        );
+    }
+
+    // ── extract_presence_stanza tests ──────────────────
+
+    #[test]
+    fn test_extract_presence_self_closing() {
+        let buf = "<presence from='user@localhost' type='subscribe'/>";
+        let (stanza, end) = extract_presence_stanza(buf).unwrap();
+        assert_eq!(stanza, buf);
+        assert_eq!(end, buf.len());
+    }
+
+    #[test]
+    fn test_extract_presence_full_closing() {
+        let buf = "<presence from='user@localhost/res'><show>chat</show></presence>";
+        let (stanza, end) = extract_presence_stanza(buf).unwrap();
+        assert_eq!(stanza, buf);
+        assert_eq!(end, buf.len());
+    }
+
+    #[test]
+    fn test_extract_presence_incomplete() {
+        let buf = "<presence from='user@localhost' type='sub";
+        assert!(extract_presence_stanza(buf).is_none());
+    }
+
+    #[test]
+    fn test_extract_presence_with_trailing_data() {
+        let buf = "<presence from='u@l' type='subscribed'/>some trailing data";
+        let (stanza, end) = extract_presence_stanza(buf).unwrap();
+        assert_eq!(stanza, "<presence from='u@l' type='subscribed'/>");
+        assert!(end < buf.len());
+    }
+
+    #[test]
+    fn test_extract_presence_no_presence() {
+        let buf = "<message from='user@localhost'><body>Hi</body></message>";
+        assert!(extract_presence_stanza(buf).is_none());
+    }
+
+    #[test]
+    fn test_extract_presence_empty_buffer() {
+        assert!(extract_presence_stanza("").is_none());
+    }
+
+    #[test]
+    fn test_extract_presence_preceded_by_other_stanzas() {
+        let buf = "<iq type='result'/><presence from='u@l' type='available'/>";
+        let (stanza, _end) = extract_presence_stanza(buf).unwrap();
+        assert_eq!(stanza, "<presence from='u@l' type='available'/>");
+    }
+
+    #[test]
+    fn test_extract_presence_muc_join_with_children() {
+        // MUC presence has child elements with self-closing tags —
+        // the /> belongs to <item/>, not <presence>
+        let buf = "<presence from='room@conf/nick'>\
+                   <x xmlns='http://jabber.org/protocol/muc#user'>\
+                   <item affiliation='member' role='participant'/>\
+                   </x></presence>";
+        let (stanza, end) = extract_presence_stanza(buf).unwrap();
+        assert_eq!(stanza, buf);
+        assert_eq!(end, buf.len());
+    }
+
+    #[test]
+    fn test_extract_presence_full_with_child_elements() {
+        // <show> and <status> inside — the /> should not match <presence>
+        let buf = "<presence from='u@l'><show>away</show><status>BRB</status></presence>";
+        let (stanza, end) = extract_presence_stanza(buf).unwrap();
+        assert_eq!(stanza, buf);
+        assert_eq!(end, buf.len());
     }
 }

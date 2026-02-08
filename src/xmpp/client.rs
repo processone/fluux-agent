@@ -253,7 +253,7 @@ impl XmppClient {
                         }
 
                         // Process all complete <presence ... /> or <presence>...</presence> stanzas
-                        while let Some(presence) = Self::extract_presence(&xml_buffer) {
+                        while let Some(presence) = stanzas::extract_presence_stanza(&xml_buffer) {
                             let (stanza, stanza_end) = presence;
 
                             if let Some(pres) = stanzas::parse_presence(&stanza) {
@@ -322,38 +322,6 @@ impl XmppClient {
     }
 }
 
-impl XmppClient {
-    /// Extracts a complete presence stanza from the buffer.
-    /// Handles both self-closing `<presence ... />` and `<presence>...</presence>`.
-    /// Returns (stanza_text, end_position) or None.
-    fn extract_presence(buffer: &str) -> Option<(String, usize)> {
-        let start = buffer.find("<presence")?;
-        let after_tag = &buffer[start..];
-
-        // Check for self-closing first: <presence ... />
-        // A self-closing tag has /> before any > that opens the tag body.
-        if let Some(close_pos) = after_tag.find("/>") {
-            let before_close = &after_tag[..close_pos];
-            let tag_opened = before_close
-                .find('>')
-                .map(|pos| !before_close[..pos + 1].ends_with("/>"))
-                .unwrap_or(false);
-            if !tag_opened {
-                let stanza_end = start + close_pos + "/>".len();
-                return Some((buffer[start..stanza_end].to_string(), stanza_end));
-            }
-        }
-
-        // Full closing tag: <presence>...</presence>
-        if let Some(close_pos) = after_tag.find("</presence>") {
-            let stanza_end = start + close_pos + "</presence>".len();
-            return Some((buffer[start..stanza_end].to_string(), stanza_end));
-        }
-
-        None // incomplete stanza
-    }
-}
-
 /// Reads from the stream until `marker` appears in the accumulated data.
 /// Handles the common XMPP pattern where the server sends the stream
 /// header and features as separate TCP segments.
@@ -386,66 +354,4 @@ async fn read_until<S: AsyncReadExt + Unpin>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── extract_presence tests ──────────────────────────
-
-    #[test]
-    fn test_extract_presence_self_closing() {
-        let buf = "<presence from='user@localhost' type='subscribe'/>";
-        let (stanza, end) = XmppClient::extract_presence(buf).unwrap();
-        assert_eq!(stanza, buf);
-        assert_eq!(end, buf.len());
-    }
-
-    #[test]
-    fn test_extract_presence_full_closing_tag() {
-        let buf = "<presence from='user@localhost/res'><show>chat</show></presence>";
-        let (stanza, end) = XmppClient::extract_presence(buf).unwrap();
-        assert_eq!(stanza, buf);
-        assert_eq!(end, buf.len());
-    }
-
-    #[test]
-    fn test_extract_presence_with_trailing_data() {
-        let buf = "<presence from='u@l' type='subscribed'/>some trailing data";
-        let (stanza, end) = XmppClient::extract_presence(buf).unwrap();
-        assert_eq!(stanza, "<presence from='u@l' type='subscribed'/>");
-        assert!(end < buf.len()); // trailing data is not consumed
-    }
-
-    #[test]
-    fn test_extract_presence_incomplete_returns_none() {
-        let buf = "<presence from='user@localhost' type='sub";
-        assert!(XmppClient::extract_presence(buf).is_none());
-    }
-
-    #[test]
-    fn test_extract_presence_no_presence_returns_none() {
-        let buf = "<message from='user@localhost'><body>Hi</body></message>";
-        assert!(XmppClient::extract_presence(buf).is_none());
-    }
-
-    #[test]
-    fn test_extract_presence_preceded_by_other_stanzas() {
-        let buf = "<iq type='result'/><presence from='u@l' type='available'/>";
-        let (stanza, _end) = XmppClient::extract_presence(buf).unwrap();
-        assert_eq!(stanza, "<presence from='u@l' type='available'/>");
-    }
-
-    #[test]
-    fn test_extract_presence_full_with_child_self_closing() {
-        // A presence with <show/> inside — the /> belongs to <show/>, not <presence>
-        let buf = "<presence from='u@l'><show>away</show><status>BRB</status></presence>";
-        let (stanza, end) = XmppClient::extract_presence(buf).unwrap();
-        assert_eq!(stanza, buf);
-        assert_eq!(end, buf.len());
-    }
-
-    #[test]
-    fn test_extract_presence_empty_buffer() {
-        assert!(XmppClient::extract_presence("").is_none());
-    }
-}
+// Tests for extract_presence_stanza are in stanzas.rs (shared utility).

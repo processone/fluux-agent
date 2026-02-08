@@ -5,7 +5,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::llm::{AnthropicClient, Message};
 use crate::xmpp::component::{ChatState, XmppCommand, XmppEvent};
-use crate::xmpp::stanzas::{MessageType, PresenceType};
+use crate::xmpp::stanzas::{self, MessageType, PresenceType};
 
 use super::memory::{Memory, WorkspaceContext};
 
@@ -58,7 +58,7 @@ impl AgentRuntime {
                     }
                 }
                 XmppEvent::Message(msg) => {
-                    let bare_from = msg.from.split('/').next().unwrap_or(&msg.from);
+                    let bare_from = stanzas::bare_jid(&msg.from);
                     let is_muc = msg.message_type == MessageType::GroupChat;
 
                     if is_muc {
@@ -214,7 +214,7 @@ impl AgentRuntime {
                     }
                 }
                 XmppEvent::Presence(pres) => {
-                    let bare_jid = pres.from.split('/').next().unwrap_or(&pres.from);
+                    let bare_jid = stanzas::bare_jid(&pres.from);
 
                     // Domain-level security check for subscription requests
                     if matches!(pres.presence_type, PresenceType::Subscribe)
@@ -268,7 +268,7 @@ impl AgentRuntime {
     /// Handles a slash command. Returns the response text.
     /// These are intercepted by the runtime and never reach the LLM.
     fn handle_command(&self, from: &str, body: &str) -> Result<String> {
-        let bare_jid = from.split('/').next().unwrap_or(from);
+        let bare_jid = stanzas::bare_jid(from);
         let parts: Vec<&str> = body.splitn(2, ' ').collect();
         let command = parts[0].to_lowercase();
 
@@ -385,7 +385,7 @@ Commands:\n\
     /// Processes an incoming message and produces a response via LLM
     async fn handle_message(&self, from: &str, body: &str) -> Result<String> {
         // Bare JID for memory (without resource)
-        let bare_jid = from.split('/').next().unwrap_or(from);
+        let bare_jid = stanzas::bare_jid(from);
 
         // Retrieve conversation history and workspace context
         let history = self.memory.get_history(bare_jid, MAX_HISTORY)?;
