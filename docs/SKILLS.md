@@ -2,6 +2,8 @@
 
 Skills extend Fluux Agent's capabilities beyond conversation. They are actions the LLM can invoke to interact with external systems, fetch data, or perform computations.
 
+**Terminology**: In Fluux, "tools" are what the LLM sees—the interface it can invoke. "Skills" are what you implement, with capability control and sandboxing. Subagents (future) would be autonomous child agents with their own reasoning loop—a layer above skills that can orchestrate multiple tool calls before returning.
+
 ## Overview
 
 ```
