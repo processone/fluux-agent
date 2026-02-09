@@ -18,7 +18,7 @@ use crate::agent::memory::Memory;
 use crate::agent::runtime::AgentRuntime;
 use crate::backoff::Backoff;
 use crate::config::Config;
-use crate::llm::AnthropicClient;
+use crate::llm::{AnthropicClient, LlmClient, OllamaClient};
 use crate::skills::builtin::WebSearchSkill;
 use crate::skills::SkillRegistry;
 use crate::xmpp::component::DisconnectReason;
@@ -143,7 +143,15 @@ async fn main() -> Result<()> {
 
     // Initialize components that persist across reconnections
     let memory = Arc::new(Memory::open(&config.memory.path)?);
-    let llm = AnthropicClient::new(config.llm.clone());
+    let llm: Arc<dyn LlmClient> = match config.llm.provider.as_str() {
+        "anthropic" => Arc::new(AnthropicClient::new(config.llm.clone())),
+        "ollama" => Arc::new(OllamaClient::new(config.llm.clone())),
+        other => {
+            return Err(anyhow!(
+                "Unsupported LLM provider: '{other}'. Supported: 'anthropic', 'ollama'."
+            ));
+        }
+    };
     let file_downloader = Arc::new(FileDownloader::with_tls_verify(3, config.server.tls_verify()));
     let mut skills = SkillRegistry::new();
 

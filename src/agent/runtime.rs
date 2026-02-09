@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 use crate::agent::files::{file_to_content_block, FileDownloader};
 use crate::config::Config;
 use crate::llm::{
-    AnthropicClient, InputContentBlock, Message, MessageContent, StopReason, ToolDefinition,
+    InputContentBlock, LlmClient, Message, MessageContent, StopReason, ToolDefinition,
 };
 use crate::xmpp::component::{ChatState, DisconnectReason, XmppCommand, XmppEvent};
 use crate::xmpp::stanzas::{self, MessageType, OobData, PresenceType};
@@ -29,7 +29,7 @@ const MAX_TOOL_ROUNDS: usize = 10;
 /// calls the LLM, and sends back responses.
 pub struct AgentRuntime {
     config: Config,
-    llm: AnthropicClient,
+    llm: Arc<dyn LlmClient>,
     memory: Arc<Memory>,
     file_downloader: Arc<FileDownloader>,
     skills: Arc<SkillRegistry>,
@@ -39,7 +39,7 @@ pub struct AgentRuntime {
 impl AgentRuntime {
     pub fn new(
         config: Config,
-        llm: AnthropicClient,
+        llm: Arc<dyn LlmClient>,
         memory: Arc<Memory>,
         file_downloader: Arc<FileDownloader>,
         skills: SkillRegistry,
@@ -240,7 +240,7 @@ impl AgentRuntime {
                             let downloader = Arc::clone(&self.file_downloader);
                             let memory = Arc::clone(&self.memory);
                             let skills = Arc::clone(&self.skills);
-                            let llm = self.llm.clone();
+                            let llm = Arc::clone(&self.llm);
                             let config = self.config.clone();
                             let cmd_tx_clone = cmd_tx.clone();
                             let from = msg.from.clone();
@@ -251,7 +251,7 @@ impl AgentRuntime {
                             tokio::spawn(async move {
                                 let result = handle_message_with_attachments(
                                     &from, &body, msg_id.as_deref(), &oob_list,
-                                    &downloader, &memory, &llm, &config, &skills,
+                                    &downloader, &memory, llm.as_ref(), &config, &skills,
                                 ).await;
 
                                 match result {
@@ -603,15 +603,14 @@ impl AgentRuntime {
             "{} — status\n\
              Uptime: {hours}h {minutes}m\n\
              Mode: {}\n\
-             LLM: {} ({})\n\
+             LLM: {}\n\
              {skills_info}\n\
              {context_info}\n\
              Workspace: instructions={}, identity={}, personality={}\n\
              {domain_info}",
             self.config.agent.name,
             self.config.server.mode_description(),
-            self.config.llm.provider,
-            self.config.llm.model,
+            self.llm.description(),
             yn(has_instructions),
             yn(has_identity),
             yn(has_personality),
@@ -641,7 +640,7 @@ Commands:\n\
         system_prompt: &str,
         messages: &mut Vec<Message>,
     ) -> Result<(String, u32, u32)> {
-        agentic_loop(system_prompt, messages, &self.llm, &self.skills).await
+        agentic_loop(system_prompt, messages, self.llm.as_ref(), &self.skills).await
     }
 
     /// Processes an incoming message and produces a response via LLM.
@@ -787,7 +786,7 @@ fn build_history_text(body: &str, oob_list: &[OobData]) -> String {
 async fn agentic_loop(
     system_prompt: &str,
     messages: &mut Vec<Message>,
-    llm: &AnthropicClient,
+    llm: &dyn LlmClient,
     skills: &SkillRegistry,
 ) -> Result<(String, u32, u32)> {
     // Build tool definitions (None if no skills registered)
@@ -884,7 +883,7 @@ async fn handle_message_with_attachments(
     oob_list: &[OobData],
     downloader: &FileDownloader,
     memory: &Memory,
-    llm: &AnthropicClient,
+    llm: &dyn LlmClient,
     config: &Config,
     skills: &SkillRegistry,
 ) -> Result<String> {
@@ -1090,6 +1089,7 @@ fn strip_mention(nick: &str, body: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::*;
+    use crate::llm::AnthropicClient;
     use tempfile::TempDir;
 
     /// Build a test runtime with a temporary memory directory
@@ -1111,6 +1111,7 @@ mod tests {
                 model: "claude-sonnet-4-5-20250929".to_string(),
                 api_key: "test-key".to_string(),
                 max_tokens_per_request: 4096,
+                host: None,
             },
             agent: AgentConfig {
                 name: "Test Agent".to_string(),
@@ -1125,7 +1126,7 @@ mod tests {
             skills: SkillsConfig::default(),
         };
 
-        let llm = AnthropicClient::new(config.llm.clone());
+        let llm: Arc<dyn LlmClient> = Arc::new(AnthropicClient::new(config.llm.clone()));
         let memory = Arc::new(Memory::open(tmp.path()).unwrap());
         let file_downloader = Arc::new(FileDownloader::new(3));
         let skills = SkillRegistry::new();

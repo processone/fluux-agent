@@ -24,7 +24,7 @@ component_secret = "${AGENT_SECRET}"
 # tls_verify = false  # set to false for self-signed certs (dev)
 
 [llm]
-# LLM provider (only "anthropic" is supported in v0.1)
+# LLM provider: "anthropic" or "ollama"
 provider = "anthropic"
 # Model to use
 model = "claude-haiku-4-5-20250110"
@@ -32,6 +32,13 @@ model = "claude-haiku-4-5-20250110"
 api_key = "${ANTHROPIC_API_KEY}"
 # Max tokens per request
 max_tokens_per_request = 4096
+
+# Alternative: Ollama (local models)
+# [llm]
+# provider = "ollama"
+# model = "llama3.2"
+# host = "http://localhost:11434"  # default; omit to use localhost
+# max_tokens_per_request = 4096
 
 [agent]
 # Agent display name

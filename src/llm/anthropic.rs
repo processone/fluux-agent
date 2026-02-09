@@ -1,9 +1,11 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::config::LlmConfig;
+use super::client::LlmClient;
 
 /// Client for Anthropic Messages API
 #[derive(Clone)]
@@ -234,14 +236,11 @@ impl AnthropicClient {
         let client = Client::new();
         Self { client, config }
     }
+}
 
-    /// Sends a conversation to the LLM and returns the response.
-    ///
-    /// When `tools` is `Some`, tool definitions are included in the request
-    /// and the response may contain `tool_use` content blocks.
-    /// When `tools` is `None`, the `tools` field is omitted from the JSON
-    /// and the API behaves as a simple text completion.
-    pub async fn complete(
+#[async_trait]
+impl LlmClient for AnthropicClient {
+    async fn complete(
         &self,
         system_prompt: &str,
         messages: &[Message],
@@ -334,6 +333,10 @@ impl AnthropicClient {
             output_tokens,
             content_blocks,
         })
+    }
+
+    fn description(&self) -> String {
+        format!("{} ({})", self.config.provider, self.config.model)
     }
 }
 

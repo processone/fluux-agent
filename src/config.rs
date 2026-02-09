@@ -70,10 +70,17 @@ fn default_tls_verify() -> bool {
 pub struct LlmConfig {
     pub provider: String,
     pub model: String,
-    /// Supports ${ENV_VAR} substitution
+    /// Supports ${ENV_VAR} substitution.
+    /// Required for Anthropic; not needed for Ollama.
+    #[serde(default)]
     pub api_key: String,
     #[serde(default = "default_max_tokens")]
     pub max_tokens_per_request: u32,
+    /// Base URL for the LLM API.
+    /// Used by Ollama (defaults to `"http://localhost:11434"` in the client).
+    /// Ignored by Anthropic.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -245,6 +252,7 @@ mod tests {
                 model: "claude-haiku-4-5-20250110".to_string(),
                 api_key: "test-key".to_string(),
                 max_tokens_per_request: 4096,
+                host: None,
             },
             agent: AgentConfig {
                 name: "Test Agent".to_string(),
