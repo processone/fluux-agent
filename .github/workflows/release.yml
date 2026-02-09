@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: fluux-agent
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - name: linux-amd64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            cross: false
+
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cross: true
+
+          - name: macos-amd64
+            os: macos-13
+            target: x86_64-apple-darwin
+            cross: false
+
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            cross: false
+
+          - name: windows-amd64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${BINARY_NAME}-${{ matrix.name }}.tar.gz ${BINARY_NAME}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${BINARY_NAME}-${{ matrix.name }}.zip ${BINARY_NAME}.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.name }}
+          path: |
+            ${{ env.BINARY_NAME }}-${{ matrix.name }}.tar.gz
+            ${{ env.BINARY_NAME }}-${{ matrix.name }}.zip
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum fluux-agent-* > sha256sums.txt
+
+      - name: Read release notes
+        id: notes
+        run: |
+          if [ -f RELEASE_NOTES.md ]; then
+            {
+              echo "body<<RELEASE_NOTES_EOF"
+              cat RELEASE_NOTES.md
+              echo "RELEASE_NOTES_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "body=Release ${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.body }}
+          files: |
+            artifacts/fluux-agent-*.tar.gz
+            artifacts/fluux-agent-*.zip
+            artifacts/sha256sums.txt
