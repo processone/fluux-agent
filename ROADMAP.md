@@ -144,6 +144,7 @@ The agent can do things beyond conversation.
 - [ ] Persona packages (bundled identity/personality/instructions, `/persona` commands)
 - [ ] LLM prompt caching (`cache_control` markers for system prompt and history prefix)
 - [ ] Context window management (token-budget history, compaction, memory flush)
+- [ ] Release build chain as GitHub Action
 
 ### Persona packages
 
