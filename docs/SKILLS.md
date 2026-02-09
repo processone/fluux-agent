@@ -12,7 +12,7 @@ Skills extend Fluux Agent's capabilities beyond conversation. They are actions t
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
-│                    Agent Runtime                             │
+│                    Agent Runtime                            │
 │  1. Builds tool definitions from SkillRegistry              │
 │  2. Sends to LLM as `tools` parameter                       │
 │  3. If LLM returns tool_use → validate → execute            │
@@ -21,7 +21,7 @@ Skills extend Fluux Agent's capabilities beyond conversation. They are actions t
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
-│                    Skill Registry                            │
+│                    Skill Registry                           │
 ├──────────────┬──────────────────┬───────────────────────────┤
 │   Builtin    │   Wasm Plugins   │       MCP Bridge          │
 │   (v0.2)     │   (v0.4)         │       (v0.3)              │
