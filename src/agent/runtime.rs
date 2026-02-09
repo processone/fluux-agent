@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::Local;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -1104,6 +1105,14 @@ fn build_system_prompt_static(agent_name: &str, ctx: &WorkspaceContext) -> Strin
     if let Some(ref memory) = ctx.user_memory {
         prompt.push_str(&format!("\n\n## Notes and memory\n{}", memory.trim()));
     }
+
+    // Inject current date so the LLM has temporal awareness
+    // (e.g. for forming time-relevant web search queries).
+    let now = Local::now();
+    prompt.push_str(&format!(
+        "\n\nCurrent date: {}",
+        now.format("%A, %B %-d, %Y")
+    ));
 
     prompt
 }
