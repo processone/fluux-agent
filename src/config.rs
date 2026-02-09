@@ -10,6 +10,9 @@ pub struct Config {
     /// MUC rooms to join on connect (XEP-0045)
     #[serde(default)]
     pub rooms: Vec<RoomConfig>,
+    /// Skill configuration. If absent, no skills are registered.
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 /// Configuration for a MUC room (XEP-0045)
@@ -91,6 +94,36 @@ pub struct MemoryConfig {
     pub backend: String,
     #[serde(default = "default_memory_path")]
     pub path: PathBuf,
+}
+
+/// Top-level skills configuration.
+///
+/// Each field corresponds to a builtin skill. If the field is `None`
+/// (i.e. the TOML section is absent), that skill is not registered.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct SkillsConfig {
+    /// Web search skill configuration.
+    pub web_search: Option<WebSearchConfig>,
+}
+
+/// Configuration for the `web_search` builtin skill.
+#[derive(Debug, Deserialize, Clone)]
+pub struct WebSearchConfig {
+    /// Search API provider: `"tavily"` or `"perplexity"`.
+    pub provider: String,
+    /// API key for the search provider. Supports `${ENV_VAR}` substitution.
+    pub api_key: String,
+    /// Maximum number of search results to return (default: 5).
+    /// Used by Tavily; ignored by Perplexity.
+    #[serde(default = "default_max_results")]
+    pub max_results: u8,
+    /// Model name for providers that support it (e.g. `"sonar"`, `"sonar-pro"`).
+    /// Used by Perplexity (defaults to `"sonar"`); ignored by Tavily.
+    pub model: Option<String>,
+}
+
+fn default_max_results() -> u8 {
+    5
 }
 
 fn default_max_tokens() -> u32 {
@@ -223,6 +256,7 @@ mod tests {
                 path: PathBuf::from("./data/memory"),
             },
             rooms: vec![],
+            skills: SkillsConfig::default(),
         }
     }
 

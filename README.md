@@ -1,6 +1,6 @@
 # Fluux Agent
 
-**A secure framework for open and federated AI agent networks — built on XMPP.**
+**A framework for open and federated AI agent networks — built on XMPP with security in mind.**
 
 Fluux Agent is the foundation for a new kind of AI infrastructure: autonomous agents that communicate over an open, federated protocol instead of walled-garden APIs. Today it's a single-agent runtime that connects to any XMPP server. Tomorrow it's a network where your agent talks to mine — across domains, across organizations — without a centralized platform controlling the conversation.
 
@@ -50,6 +50,7 @@ Fluux Agent brings these two worlds together: the power of modern AI agents with
 
 - **Open and federated** — Agents communicate over XMPP, an open standard with native federation. No vendor lock-in, no centralized platform. Your agent, your server, your rules.
 - **Total decoupling** — The agent is a standard XMPP component. It works with any XMPP server, not just ejabberd.
+- **Designed for teams** — Each user has their own isolated conversation context and memory directory, while shared skills and procedures are accessible to everyone. One agent instance serves the whole team with clean separation of personal data and shared capabilities.
 - **Security by design** — Defense-in-depth with 5 independent layers: declarative capabilities, action validation, Wasm sandbox, kernel sandboxing (Landlock/seccomp), and process isolation. The LLM never directly touches the system. In corporate deployments, the agent will be able to scan conversations and detect prompt injection attempts, limiting the risk of adversarial manipulation through crafted messages. See [Security Architecture](docs/SECURITY.md).
 - **No public endpoint required** — XMPP acts as your inbound transport. The agent runs on your laptop or private network and connects to an XMPP server (your own or a public one like `conversations.im`). Services can reach your agent by sending XMPP messages — no need to expose webhooks or open firewall ports. This makes local development and secure production deployments trivial.
 - **Enterprise control layer** — XMPP + Fluux Agent creates an AI gateway for organizations. The XMPP server can act as an LLM firewall, scanning traffic for prompt injection before messages reach the agent. Model changes, cost optimization, and configuration updates happen server-side without touching client applications. End users interact with a stable XMPP address while the backend switches between Claude, GPT, or local models transparently.

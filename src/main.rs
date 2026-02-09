@@ -19,6 +19,7 @@ use crate::agent::runtime::AgentRuntime;
 use crate::backoff::Backoff;
 use crate::config::Config;
 use crate::llm::AnthropicClient;
+use crate::skills::builtin::WebSearchSkill;
 use crate::skills::SkillRegistry;
 use crate::xmpp::component::DisconnectReason;
 
@@ -29,8 +30,64 @@ const STABILITY_THRESHOLD: Duration = Duration::from_secs(60);
 /// Maximum consecutive transient failures before giving up.
 const MAX_RECONNECT_ATTEMPTS: u32 = 20;
 
+fn print_help() {
+    println!(
+        "\
+fluux-agent v{}
+
+An AI agent runtime that connects to any XMPP server.
+
+USAGE:
+    fluux-agent [OPTIONS] [CONFIG_PATH]
+
+ARGUMENTS:
+    CONFIG_PATH    Path to TOML configuration file [default: config/agent.toml]
+
+OPTIONS:
+    -h, --help       Print this help message and exit
+    -V, --version    Print version and exit
+
+ENVIRONMENT VARIABLES:
+    Variables are referenced in the config file via ${{VAR_NAME}} syntax.
+
+    RUST_LOG              Log level filter for tracing
+                          (e.g. debug, fluux_agent=debug,warn)
+    ANTHROPIC_API_KEY     API key for Anthropic Claude models
+                          (from https://console.anthropic.com/)
+    AGENT_SECRET          Shared secret for XMPP component connection
+                          (XEP-0114 mode)
+    BOT_PASSWORD          XMPP account password for client connection
+                          (C2S mode)
+    TAVILY_API_KEY        API key for Tavily web search
+                          (from https://tavily.com)
+    PERPLEXITY_API_KEY    API key for Perplexity Sonar search
+                          (from https://perplexity.ai)
+
+EXAMPLES:
+    fluux-agent                          # uses config/agent.toml
+    fluux-agent /etc/fluux/agent.toml    # custom config path
+    RUST_LOG=debug fluux-agent           # with debug logging",
+        env!("CARGO_PKG_VERSION"),
+    );
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Handle --help / --version before anything else
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("fluux-agent v{}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+
     // Initialize logging (RUST_LOG=debug for debug mode)
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -88,7 +145,17 @@ async fn main() -> Result<()> {
     let memory = Arc::new(Memory::open(&config.memory.path)?);
     let llm = AnthropicClient::new(config.llm.clone());
     let file_downloader = Arc::new(FileDownloader::with_tls_verify(3, config.server.tls_verify()));
-    let skills = SkillRegistry::new();
+    let mut skills = SkillRegistry::new();
+
+    // Register builtin skills based on config
+    if let Some(ref ws_config) = config.skills.web_search {
+        info!(
+            "Registering builtin skill: web_search (provider: {})",
+            ws_config.provider
+        );
+        skills.register(Box::new(WebSearchSkill::new(ws_config)));
+    }
+
     info!("Skills: {} registered", skills.len());
     let runtime = AgentRuntime::new(config.clone(), llm, memory, file_downloader, skills);
 

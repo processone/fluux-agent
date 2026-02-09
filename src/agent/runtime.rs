@@ -1122,6 +1122,7 @@ mod tests {
                 path: tmp.path().to_path_buf(),
             },
             rooms: vec![],
+            skills: SkillsConfig::default(),
         };
 
         let llm = AnthropicClient::new(config.llm.clone());
