@@ -132,6 +132,7 @@ The agent can do things beyond conversation.
 - [x] Builtin skill: web search (Tavily + Perplexity providers)
 - [x] Session file structure migration (markdown → JSONL)
 - [x] File attachments — receive images/documents via OOB (XEP-0066), download, pass to LLM
+- [ ] Builtin skill: GitHub (issues, PRs, repositories, notifications)
 - [ ] Sub-agent spawning (built-in runtime tool, one level deep)
 - [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides
 - [ ] Declarative skill capabilities (TOML manifests)
@@ -639,23 +640,15 @@ When the conversation exceeds the token budget, instead of dropping old messages
 - Recent messages after the compaction point are preserved verbatim
 - The summary is written to disk (in the session file) so it persists across restarts
 
-**Compaction result format** in history:
+**Compaction result format** in history (JSONL):
 
+```jsonl
+{"Summary":{"compacted_count":45,"content":"Alice asked about deploying Fluux Agent. Bob suggested using Docker. The team decided on a Kubernetes deployment with Helm charts. Key decisions: PostgreSQL for persistence, Redis for caching.","ts":"2025-01-15T10:30:00Z"}}
+{"Message":{"role":"user","content":"OK, I'll draft the Helm chart today.","msg_id":"abc-789","sender":"alice@muc","ts":"2025-01-15T10:31:00Z"}}
+{"Message":{"role":"assistant","content":"Great! Let me know if you need help with the values.yaml structure.","msg_id":"def-012","sender":null,"ts":"2025-01-15T10:31:05Z"}}
 ```
-### system
-[compacted: 45 messages summarized]
-Alice asked about deploying Fluux Agent. Bob suggested using Docker.
-The team decided on a Kubernetes deployment with Helm charts.
-Key decisions: PostgreSQL for persistence, Redis for caching.
 
-### user (alice@muc)
-[msg_id: abc-789]
-OK, I'll draft the Helm chart today.
-
-### assistant
-[msg_id: def-012]
-Great! Let me know if you need help with the values.yaml structure.
-```
+The `Summary` entry type is added to the `SessionEntry` enum alongside `Header` and `Message`, containing the compaction metadata and summarized content.
 
 #### 3. Memory flush (persistent context extraction)
 
@@ -721,6 +714,48 @@ provider = "tavily"               # "tavily" or "perplexity"
 api_key = "${TAVILY_API_KEY}"
 max_results = 5
 ```
+
+### GitHub skill
+
+A native builtin skill for interacting with GitHub repositories, issues, pull requests, and notifications. Unlike using the MCP bridge with `@anthropic/mcp-server-github`, a native skill has no Node.js dependency and integrates tightly with the agent's capabilities system.
+
+#### Tools exposed to the LLM
+
+| Tool                     | Description                                           |
+|--------------------------|-------------------------------------------------------|
+| `github_list_issues`     | List issues in a repository (with filters)            |
+| `github_get_issue`       | Get details of a specific issue                       |
+| `github_create_issue`    | Create a new issue                                    |
+| `github_comment_issue`   | Add a comment to an issue                             |
+| `github_list_prs`        | List pull requests (open, closed, merged)             |
+| `github_get_pr`          | Get PR details including diff stats                   |
+| `github_list_repos`      | List repositories for a user or organization          |
+| `github_search`          | Search issues, PRs, code, or repositories             |
+| `github_notifications`   | List unread notifications                             |
+
+#### Configuration
+
+```toml
+[skills.github]
+enabled = true
+token = "${GITHUB_TOKEN}"         # Personal access token or GitHub App token
+default_owner = "fluux"           # Optional: default org/user for unqualified repo names
+```
+
+#### Use cases
+
+- **Issue triage** — "Show me open issues labeled 'bug' in fluux-agent"
+- **PR review assistance** — "Summarize the changes in PR #42"
+- **Notifications** — "What GitHub notifications do I have?"
+- **Cross-repo search** — "Find all issues mentioning 'memory leak' across my repos"
+- **Project management** — "Create an issue for the auth refactor we discussed"
+
+#### Why native instead of MCP
+
+- **No runtime dependency** — Works without Node.js/npx installed
+- **Lower latency** — No process spawning overhead per request
+- **Capability enforcement** — Integrated with the agent's capability system
+- **Optimized for common flows** — Can batch API calls, cache responses, handle pagination intelligently
 
 ### Model tiering
 
