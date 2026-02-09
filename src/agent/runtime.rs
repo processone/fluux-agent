@@ -6,7 +6,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::agent::files::{file_to_content_block, FileDownloader};
 use crate::config::Config;
-use crate::llm::{AnthropicClient, InputContentBlock, Message, MessageContent};
+use crate::llm::{
+    AnthropicClient, InputContentBlock, Message, MessageContent, StopReason, ToolDefinition,
+};
 use crate::xmpp::component::{ChatState, DisconnectReason, XmppCommand, XmppEvent};
 use crate::xmpp::stanzas::{self, MessageType, OobData, PresenceType};
 
@@ -17,6 +19,10 @@ use super::memory::{build_message_for_llm, Memory, WorkspaceContext};
 /// Maximum number of history messages sent to the LLM
 const MAX_HISTORY: usize = 20;
 
+/// Maximum number of tool-call rounds per user message.
+/// Prevents runaway loops if the LLM keeps requesting tools.
+const MAX_TOOL_ROUNDS: usize = 10;
+
 /// The agentic runtime — core of Fluux Agent.
 ///
 /// Receives XMPP events, builds context,
@@ -26,7 +32,7 @@ pub struct AgentRuntime {
     llm: AnthropicClient,
     memory: Arc<Memory>,
     file_downloader: Arc<FileDownloader>,
-    skills: SkillRegistry,
+    skills: Arc<SkillRegistry>,
     start_time: std::time::Instant,
 }
 
@@ -43,7 +49,7 @@ impl AgentRuntime {
             llm,
             memory,
             file_downloader,
-            skills,
+            skills: Arc::new(skills),
             start_time: std::time::Instant::now(),
         }
     }
@@ -233,6 +239,7 @@ impl AgentRuntime {
 
                             let downloader = Arc::clone(&self.file_downloader);
                             let memory = Arc::clone(&self.memory);
+                            let skills = Arc::clone(&self.skills);
                             let llm = self.llm.clone();
                             let config = self.config.clone();
                             let cmd_tx_clone = cmd_tx.clone();
@@ -244,7 +251,7 @@ impl AgentRuntime {
                             tokio::spawn(async move {
                                 let result = handle_message_with_attachments(
                                     &from, &body, msg_id.as_deref(), &oob_list,
-                                    &downloader, &memory, &llm, &config,
+                                    &downloader, &memory, &llm, &config, &skills,
                                 ).await;
 
                                 match result {
@@ -625,6 +632,18 @@ Commands:\n\
 
     // ── LLM message handling ─────────────────────────────
 
+    /// Calls the LLM with optional tool support, running the agentic loop.
+    ///
+    /// Delegates to the free `agentic_loop()` function. When no skills are
+    /// registered, this is equivalent to a single `llm.complete()` call.
+    async fn call_llm_with_tools(
+        &self,
+        system_prompt: &str,
+        messages: &mut Vec<Message>,
+    ) -> Result<(String, u32, u32)> {
+        agentic_loop(system_prompt, messages, &self.llm, &self.skills).await
+    }
+
     /// Processes an incoming message and produces a response via LLM.
     /// `msg_id` is the inbound XMPP stanza id (stored as structured metadata).
     async fn handle_message(&self, from: &str, body: &str, msg_id: Option<&str>) -> Result<String> {
@@ -646,8 +665,9 @@ Commands:\n\
             None,
         ));
 
-        // Call LLM
-        let response = self.llm.complete(&system_prompt, &messages).await?;
+        // Agentic loop (returns immediately if no tools registered)
+        let (text, input_tokens, output_tokens) =
+            self.call_llm_with_tools(&system_prompt, &mut messages).await?;
 
         // Generate outbound message id
         let out_id = uuid::Uuid::new_v4().to_string();
@@ -655,15 +675,15 @@ Commands:\n\
         // Persist messages with structured metadata (clean content, metadata as fields)
         self.memory.store_message_structured(bare_jid, "user", body, msg_id, Some(bare_jid))?;
         self.memory
-            .store_message_structured(bare_jid, "assistant", &response.text, Some(&out_id), None)?;
+            .store_message_structured(bare_jid, "assistant", &text, Some(&out_id), None)?;
 
         info!(
             "Response to {bare_jid}: {} chars ({} tokens used)",
-            response.text.len(),
-            response.input_tokens + response.output_tokens
+            text.len(),
+            input_tokens + output_tokens
         );
 
-        Ok(response.text)
+        Ok(text)
     }
 
     /// Processes a reaction via LLM.
@@ -676,17 +696,18 @@ Commands:\n\
         let system_prompt = self.build_system_prompt(&workspace);
 
         // The reaction is already the last entry in history (stored by caller)
-        let messages = history;
+        let mut messages = history;
 
-        let response = self.llm.complete(&system_prompt, &messages).await?;
+        let (text, input_tokens, output_tokens) =
+            self.call_llm_with_tools(&system_prompt, &mut messages).await?;
 
         info!(
             "Reaction response to {jid}: {} chars ({} tokens used)",
-            response.text.len(),
-            response.input_tokens + response.output_tokens
+            text.len(),
+            input_tokens + output_tokens
         );
 
-        Ok(response.text)
+        Ok(text)
     }
 
     /// Processes a MUC message via LLM.
@@ -701,18 +722,19 @@ Commands:\n\
         let system_prompt = self.build_system_prompt(&workspace);
 
         // The user message is already the last entry in history (stored by caller)
-        let messages = history;
+        let mut messages = history;
 
-        // Call LLM
-        let response = self.llm.complete(&system_prompt, &messages).await?;
+        // Agentic loop (returns immediately if no tools registered)
+        let (text, input_tokens, output_tokens) =
+            self.call_llm_with_tools(&system_prompt, &mut messages).await?;
 
         info!(
             "MUC response to {room_jid}: {} chars ({} tokens used)",
-            response.text.len(),
-            response.input_tokens + response.output_tokens
+            text.len(),
+            input_tokens + output_tokens
         );
 
-        Ok(response.text)
+        Ok(text)
     }
 
     /// Builds the system prompt from workspace files.
@@ -751,6 +773,105 @@ fn build_history_text(body: &str, oob_list: &[OobData]) -> String {
     parts.join("\n")
 }
 
+/// Agentic tool-use loop (free function for use from both methods and spawned tasks).
+///
+/// If skills are registered, tool definitions are passed to the LLM. When the LLM
+/// responds with `tool_use` blocks, the corresponding skills are executed and results
+/// fed back in a loop until the LLM produces a final text response.
+///
+/// `messages` is mutated during the loop (intermediate tool turns are appended).
+/// Only the final text response is returned — intermediate tool calls are not
+/// stored in persistent history.
+///
+/// Returns `(final_text, total_input_tokens, total_output_tokens)`.
+async fn agentic_loop(
+    system_prompt: &str,
+    messages: &mut Vec<Message>,
+    llm: &AnthropicClient,
+    skills: &SkillRegistry,
+) -> Result<(String, u32, u32)> {
+    // Build tool definitions (None if no skills registered)
+    let tool_defs: Option<Vec<ToolDefinition>> = if skills.is_empty() {
+        None
+    } else {
+        Some(skills.tool_definitions())
+    };
+    let tools_ref = tool_defs.as_deref();
+
+    let mut total_input = 0u32;
+    let mut total_output = 0u32;
+
+    for round in 0..MAX_TOOL_ROUNDS {
+        let response = llm.complete(system_prompt, messages, tools_ref).await?;
+
+        total_input = total_input.saturating_add(response.input_tokens);
+        total_output = total_output.saturating_add(response.output_tokens);
+
+        // If no tool calls, we're done — return the text response
+        if response.stop_reason != StopReason::ToolUse || response.tool_calls.is_empty() {
+            return Ok((response.text, total_input, total_output));
+        }
+
+        // Log tool calls
+        for tc in &response.tool_calls {
+            info!(
+                "Tool call [round {}/{}]: {}({})",
+                round + 1,
+                MAX_TOOL_ROUNDS,
+                tc.name,
+                tc.input,
+            );
+        }
+
+        // Append assistant message with the raw content blocks (text + tool_use)
+        messages.push(Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(response.content_blocks),
+        });
+
+        // Execute each tool call and collect results
+        let mut result_blocks = Vec::new();
+        for tc in &response.tool_calls {
+            let result_content = match skills.get(&tc.name) {
+                Some(skill) => match skill.execute(tc.input.clone()).await {
+                    Ok(output) => output,
+                    Err(e) => {
+                        warn!("Skill {} failed: {e}", tc.name);
+                        format!("Error: {e}")
+                    }
+                },
+                None => {
+                    warn!("Unknown skill requested: {}", tc.name);
+                    format!("Error: unknown tool '{}'", tc.name)
+                }
+            };
+
+            info!("Tool result for {}: {} chars", tc.name, result_content.len());
+
+            result_blocks.push(InputContentBlock::ToolResult {
+                tool_use_id: tc.id.clone(),
+                content: result_content,
+            });
+        }
+
+        // Append user message with tool_result blocks
+        messages.push(Message {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(result_blocks),
+        });
+    }
+
+    // Exhausted all rounds — make one final call without tools to force a text response
+    warn!(
+        "Agentic loop exhausted {} rounds, forcing final response",
+        MAX_TOOL_ROUNDS
+    );
+    let response = llm.complete(system_prompt, messages, None).await?;
+    total_input = total_input.saturating_add(response.input_tokens);
+    total_output = total_output.saturating_add(response.output_tokens);
+    Ok((response.text, total_input, total_output))
+}
+
 /// Handles a 1:1 message with OOB file attachments.
 ///
 /// Downloads each file, converts supported types to Anthropic API content blocks,
@@ -765,6 +886,7 @@ async fn handle_message_with_attachments(
     memory: &Memory,
     llm: &AnthropicClient,
     config: &Config,
+    skills: &SkillRegistry,
 ) -> Result<String> {
     let bare_jid = stanzas::bare_jid(from);
     let files_dir = memory.files_dir(bare_jid)?;
@@ -845,8 +967,9 @@ async fn handle_message_with_attachments(
 
     debug!("Calling LLM with {} messages (including attachment)", messages.len());
 
-    // Call LLM
-    let response = llm.complete(&system_prompt, &messages).await?;
+    // Agentic loop (returns immediately if no tools registered)
+    let (text, input_tokens, output_tokens) =
+        agentic_loop(&system_prompt, &mut messages, llm, skills).await?;
 
     // Store messages in history (text description, not base64)
     // Content is clean — metadata stored as JSONL fields
@@ -861,15 +984,15 @@ async fn handle_message_with_attachments(
     memory.store_message_structured(bare_jid, "user", &history_content, msg_id, Some(bare_jid))?;
 
     let out_id = uuid::Uuid::new_v4().to_string();
-    memory.store_message_structured(bare_jid, "assistant", &response.text, Some(&out_id), None)?;
+    memory.store_message_structured(bare_jid, "assistant", &text, Some(&out_id), None)?;
 
     info!(
         "Attachment response to {bare_jid}: {} chars ({} tokens used)",
-        response.text.len(),
-        response.input_tokens + response.output_tokens
+        text.len(),
+        input_tokens + output_tokens
     );
 
-    Ok(response.text)
+    Ok(text)
 }
 
 /// Static version of build_system_prompt for use from spawned tasks.
@@ -1513,11 +1636,125 @@ mod tests {
         }
 
         let (mut rt, _tmp) = test_runtime();
-        rt.skills.register(Box::new(StubSkill("web_search")));
-        rt.skills.register(Box::new(StubSkill("url_fetch")));
+        let skills = Arc::get_mut(&mut rt.skills).unwrap();
+        skills.register(Box::new(StubSkill("web_search")));
+        skills.register(Box::new(StubSkill("url_fetch")));
 
         let result = rt.handle_command("admin@localhost", "/status").unwrap();
         assert!(result.contains("Skills: url_fetch, web_search"));
         assert!(!result.contains("Skills: none"));
+    }
+
+    // ── Agentic loop message structure tests ─────────────
+
+    #[test]
+    fn test_tool_result_message_structure() {
+        use crate::llm::InputContentBlock;
+
+        let msg = Message {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(vec![
+                InputContentBlock::ToolResult {
+                    tool_use_id: "toolu_abc123".to_string(),
+                    content: "Search returned 5 results".to_string(),
+                },
+            ]),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["role"], "user");
+        let blocks = json["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "toolu_abc123");
+        assert_eq!(blocks[0]["content"], "Search returned 5 results");
+    }
+
+    #[test]
+    fn test_assistant_tool_use_message_structure() {
+        use crate::llm::InputContentBlock;
+
+        let msg = Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(vec![
+                InputContentBlock::Text {
+                    text: "Let me search for that.".to_string(),
+                },
+                InputContentBlock::ToolUse {
+                    id: "toolu_abc123".to_string(),
+                    name: "web_search".to_string(),
+                    input: serde_json::json!({"query": "rust async"}),
+                },
+            ]),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["role"], "assistant");
+        let blocks = json["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "tool_use");
+        assert_eq!(blocks[1]["name"], "web_search");
+    }
+
+    #[test]
+    fn test_agentic_conversation_roundtrip() {
+        use crate::llm::InputContentBlock;
+
+        // Simulate the full agentic conversation:
+        // 1. User asks a question
+        // 2. Assistant responds with tool_use
+        // 3. User sends tool_result
+        // 4. Assistant responds with text
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("What is Rust?".to_string()),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![InputContentBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "web_search".to_string(),
+                    input: serde_json::json!({"query": "Rust programming language"}),
+                }]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![InputContentBlock::ToolResult {
+                    tool_use_id: "toolu_1".to_string(),
+                    content: "Rust is a systems programming language.".to_string(),
+                }]),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Text(
+                    "Rust is a systems programming language focused on safety.".to_string(),
+                ),
+            },
+        ];
+
+        let json = serde_json::to_value(&messages).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[0]["content"], "What is Rust?");
+        assert_eq!(arr[1]["role"], "assistant");
+        assert_eq!(arr[1]["content"][0]["type"], "tool_use");
+        assert_eq!(arr[2]["role"], "user");
+        assert_eq!(arr[2]["content"][0]["type"], "tool_result");
+        assert_eq!(arr[3]["role"], "assistant");
+        assert!(arr[3]["content"].is_string());
+    }
+
+    #[test]
+    fn test_empty_skills_produces_none_tools() {
+        let registry = SkillRegistry::new();
+        let defs = registry.tool_definitions();
+        assert!(defs.is_empty());
+        // The agentic loop converts empty → None (not Some([]))
+        let tools: Option<Vec<crate::llm::ToolDefinition>> = if registry.is_empty() {
+            None
+        } else {
+            Some(defs)
+        };
+        assert!(tools.is_none());
     }
 }
