@@ -56,6 +56,7 @@ Fluux Agent brings these two worlds together: the power of modern AI agents with
 - **Enterprise control layer** — XMPP + Fluux Agent creates an AI gateway for organizations. The XMPP server can act as an LLM firewall, scanning traffic for prompt injection before messages reach the agent. Model changes, cost optimization, and configuration updates happen server-side without touching client applications. End users interact with a stable XMPP address while the backend switches between Claude, Ollama, or other models transparently.
 - **Proactivity** — Cron jobs, PubSub subscriptions, webhooks. The agent can initiate conversations, not just respond.
 - **Federation** — My agent `agent.domain-a.com` talks to your agent `agent.domain-b.com` via XMPP federation. No centralized platform.
+- **Collaborative by design** — The goal of Fluux Agent is to improve collaboration, not replace human judgment. The system keeps humans in the loop for decisions that matter — confirmation prompts, skill approvals, and oversight of agent actions. Skills are not exclusively AI-powered: human experts can expose their knowledge and capabilities as skills, creating a hybrid network where agents route tasks to the best available resource, whether that's an LLM, an API, or a person.
 
 ## Vision
 
