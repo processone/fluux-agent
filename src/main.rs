@@ -19,6 +19,7 @@ use crate::agent::runtime::AgentRuntime;
 use crate::backoff::Backoff;
 use crate::config::Config;
 use crate::llm::AnthropicClient;
+use crate::skills::SkillRegistry;
 use crate::xmpp::component::DisconnectReason;
 
 /// How long a connection must be up before we consider it "stable"
@@ -87,7 +88,9 @@ async fn main() -> Result<()> {
     let memory = Arc::new(Memory::open(&config.memory.path)?);
     let llm = AnthropicClient::new(config.llm.clone());
     let file_downloader = Arc::new(FileDownloader::with_tls_verify(3, config.server.tls_verify()));
-    let runtime = AgentRuntime::new(config.clone(), llm, memory, file_downloader);
+    let skills = SkillRegistry::new();
+    info!("Skills: {} registered", skills.len());
+    let runtime = AgentRuntime::new(config.clone(), llm, memory, file_downloader, skills);
 
     let mut backoff = Backoff::new(
         Duration::from_secs(2),

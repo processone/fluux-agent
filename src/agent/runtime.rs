@@ -10,6 +10,8 @@ use crate::llm::{AnthropicClient, InputContentBlock, Message, MessageContent};
 use crate::xmpp::component::{ChatState, DisconnectReason, XmppCommand, XmppEvent};
 use crate::xmpp::stanzas::{self, MessageType, OobData, PresenceType};
 
+use crate::skills::SkillRegistry;
+
 use super::memory::{build_message_for_llm, Memory, WorkspaceContext};
 
 /// Maximum number of history messages sent to the LLM
@@ -24,6 +26,7 @@ pub struct AgentRuntime {
     llm: AnthropicClient,
     memory: Arc<Memory>,
     file_downloader: Arc<FileDownloader>,
+    skills: SkillRegistry,
     start_time: std::time::Instant,
 }
 
@@ -33,12 +36,14 @@ impl AgentRuntime {
         llm: AnthropicClient,
         memory: Arc<Memory>,
         file_downloader: Arc<FileDownloader>,
+        skills: SkillRegistry,
     ) -> Self {
         Self {
             config,
             llm,
             memory,
             file_downloader,
+            skills,
             start_time: std::time::Instant::now(),
         }
     }
@@ -581,11 +586,18 @@ impl AgentRuntime {
             )
         };
 
+        let skills_info = if self.skills.is_empty() {
+            "Skills: none".to_string()
+        } else {
+            format!("Skills: {}", self.skills.skill_names().join(", "))
+        };
+
         Ok(format!(
             "{} — status\n\
              Uptime: {hours}h {minutes}m\n\
              Mode: {}\n\
              LLM: {} ({})\n\
+             {skills_info}\n\
              {context_info}\n\
              Workspace: instructions={}, identity={}, personality={}\n\
              {domain_info}",
@@ -992,7 +1004,8 @@ mod tests {
         let llm = AnthropicClient::new(config.llm.clone());
         let memory = Arc::new(Memory::open(tmp.path()).unwrap());
         let file_downloader = Arc::new(FileDownloader::new(3));
-        let runtime = AgentRuntime::new(config, llm, memory, file_downloader);
+        let skills = SkillRegistry::new();
+        let runtime = AgentRuntime::new(config, llm, memory, file_downloader, skills);
         (runtime, tmp)
     }
 
@@ -1324,6 +1337,7 @@ mod tests {
         assert!(result.contains("Uptime:"));
         assert!(result.contains("C2S client"));
         assert!(result.contains("anthropic"));
+        assert!(result.contains("Skills: none"));
         assert!(result.contains("1 messages"));
         assert!(result.contains("User profile: none"));
         assert!(result.contains("User memory: none"));
@@ -1478,5 +1492,32 @@ mod tests {
         let result = rt.handle_command("admin@localhost", "/status").unwrap();
         // When there are no files, the "Files:" line should not appear
         assert!(!result.contains("Files:"));
+    }
+
+    // ── Status with skills test ─────────────────────────
+
+    #[test]
+    fn test_command_status_with_skills() {
+        use async_trait::async_trait;
+        use crate::skills::Skill;
+
+        struct StubSkill(&'static str);
+        #[async_trait]
+        impl Skill for StubSkill {
+            fn name(&self) -> &str { self.0 }
+            fn description(&self) -> &str { "" }
+            fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _: serde_json::Value) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+        }
+
+        let (mut rt, _tmp) = test_runtime();
+        rt.skills.register(Box::new(StubSkill("web_search")));
+        rt.skills.register(Box::new(StubSkill("url_fetch")));
+
+        let result = rt.handle_command("admin@localhost", "/status").unwrap();
+        assert!(result.contains("Skills: url_fetch, web_search"));
+        assert!(!result.contains("Skills: none"));
     }
 }

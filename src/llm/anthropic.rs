@@ -122,6 +122,24 @@ pub struct DocumentSource {
     pub data: String,       // base64-encoded document bytes
 }
 
+// ── Tool definition (for API `tools[]` parameter) ────────
+
+/// Tool definition for the Anthropic Messages API `tools[]` parameter.
+///
+/// Serializes to:
+/// ```json
+/// {"name": "web_search", "description": "...", "input_schema": {...}}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolDefinition {
+    /// Tool name (matches `Skill::name()`)
+    pub name: String,
+    /// Human-readable description (matches `Skill::description()`)
+    pub description: String,
+    /// JSON Schema for accepted parameters (matches `Skill::parameters_schema()`)
+    pub input_schema: serde_json::Value,
+}
+
 // ── Response types (from API) ─────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -324,5 +342,43 @@ mod tests {
             }
             _ => panic!("Expected Blocks variant"),
         }
+    }
+
+    // ── ToolDefinition tests ────────────────────────────
+
+    #[test]
+    fn test_tool_definition_serializes_to_api_format() {
+        let tool = ToolDefinition {
+            name: "web_search".to_string(),
+            description: "Search the web".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"}
+                },
+                "required": ["query"]
+            }),
+        };
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["name"], "web_search");
+        assert_eq!(json["description"], "Search the web");
+        assert_eq!(json["input_schema"]["type"], "object");
+        assert_eq!(
+            json["input_schema"]["properties"]["query"]["type"],
+            "string"
+        );
+        assert_eq!(json["input_schema"]["required"][0], "query");
+    }
+
+    #[test]
+    fn test_tool_definition_roundtrip() {
+        let tool = ToolDefinition {
+            name: "hello".to_string(),
+            description: "Says hello".to_string(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+        };
+        let json = serde_json::to_string(&tool).unwrap();
+        let parsed: ToolDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(tool, parsed);
     }
 }
