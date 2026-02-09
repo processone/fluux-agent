@@ -2,15 +2,17 @@
 
 This document explores the design of an XMPP messaging skill that allows the agent to send messages to other XMPP contacts on behalf of the user.
 
+Note: This messaging skill can be more powerful when run as an external XMPP component that can require extra right to behave on behalf of agent users. This will need even more guardrails.
+
 ## The Question
 
 Should the agent be able to send XMPP messages to other contacts? If so, how should this capability be implemented?
 
-| Option | Description | Trade-offs |
-|--------|-------------|------------|
+| Option           | Description                               | Trade-offs                                                        |
+|------------------|-------------------------------------------|-------------------------------------------------------------------|
 | **Core Feature** | Built into the agent's base functionality | Always available, but can't be disabled; increases attack surface |
-| **Skill** | Modular capability loaded on demand | Can be enabled/disabled, fits capability system |
-| **Tool** | LLM-invokable action during reasoning | Enables proactive behavior, but highest autonomy risk |
+| **Skill**        | Modular capability loaded on demand       | Can be enabled/disabled, fits capability system                   |
+| **Tool**         | LLM-invokable action during reasoning     | Enables proactive behavior, but highest autonomy risk             |
 
 ## Recommendation: Skill with Tool Exposure
 
@@ -55,12 +57,12 @@ The recommended approach is a **skill that exposes a tool to the LLM**, with str
 
 This is a **high-risk capability**. An agent that can message arbitrary contacts could:
 
-| Risk | Description | Mitigation |
-|------|-------------|------------|
+| Risk                    | Description                                        | Mitigation                           |
+|-------------------------|----------------------------------------------------|--------------------------------------|
 | **Information leakage** | LLM shares conversation context with third parties | Content filtering, context isolation |
-| **Spam/harassment** | Agent sends unwanted messages | Rate limiting, allowlist |
-| **Social engineering** | Agent used to manipulate contacts | Audit logging, user review |
-| **Impersonation** | Messages appear to come from user | Clear agent attribution option |
+| **Spam/harassment**     | Agent sends unwanted messages                      | Rate limiting, allowlist             |
+| **Social engineering**  | Agent used to manipulate contacts                  | Audit logging, user review           |
+| **Impersonation**       | Messages appear to come from user                  | Clear agent attribution option       |
 
 ### Why Not Core Feature?
 
