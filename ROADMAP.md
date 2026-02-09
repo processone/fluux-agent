@@ -134,6 +134,7 @@ The agent can do things beyond conversation.
 - [x] File attachments — receive images/documents via OOB (XEP-0066), download, pass to LLM
 - [x] Release build chain as GitHub Action
 - [x] Builtin skill: URL fetch and summarize
+- [ ] LLM API error handling (retry with backoff, fallback models, graceful degradation) (example: Sorry, an error occurred: Claude API error (500 Internal Server Error): {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_0..."})
 - [ ] Builtin skill: GitHub (issues, PRs, repositories, notifications)
 - [ ] Sub-agent spawning (built-in runtime tool, one level deep)
 - [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides

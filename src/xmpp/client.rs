@@ -300,15 +300,11 @@ impl XmppClient {
                     {
                         Ok(result) => result,
                         Err(_elapsed) => {
-                            warn!(
-                                "Read timeout ({timeout_dur:?}) — connection appears dead"
-                            );
+                            debug!("Read timeout — requesting connection probe");
                             let _ = event_tx_clone
-                                .send(XmppEvent::Error(
-                                    "Read timeout — connection dead".into(),
-                                ))
+                                .send(XmppEvent::ReadTimeout)
                                 .await;
-                            break;
+                            continue;
                         }
                     }
                 } else {

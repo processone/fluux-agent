@@ -157,7 +157,8 @@ pub struct KeepaliveConfig {
     #[serde(default = "default_ping_interval")]
     pub ping_interval_secs: u64,
     /// Read timeout in seconds. If no data is received for this duration,
-    /// the connection is considered dead. Default: 300 (5 minutes).
+    /// a whitespace ping probe is sent to check if the connection is alive.
+    /// Default: 300 (5 minutes).
     #[serde(default = "default_read_timeout")]
     pub read_timeout_secs: u64,
 }

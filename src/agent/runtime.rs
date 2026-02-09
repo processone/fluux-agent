@@ -518,7 +518,11 @@ impl AgentRuntime {
                 }
                 XmppEvent::Error(e) => {
                     error!("XMPP error: {e}");
-                    if e.contains("Read timeout") {
+                }
+                XmppEvent::ReadTimeout => {
+                    debug!("Read timeout — probing connection with ping");
+                    if cmd_tx.send(XmppCommand::Ping).await.is_err() {
+                        warn!("Probe ping failed (channel closed) — connection lost");
                         return Ok(DisconnectReason::ConnectionLost);
                     }
                 }

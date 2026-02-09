@@ -23,6 +23,9 @@ pub enum XmppEvent {
     /// A `<stream:error>` was received (e.g. `conflict`, `system-shutdown`).
     StreamError(String),
     Error(String),
+    /// No data received within the read timeout window.
+    /// The runtime should probe the connection (e.g. send a whitespace ping).
+    ReadTimeout,
 }
 
 /// Commands sent by the runtime to the XMPP layer
@@ -231,15 +234,11 @@ impl XmppComponent {
                     {
                         Ok(result) => result,
                         Err(_elapsed) => {
-                            warn!(
-                                "Read timeout ({timeout_dur:?}) — connection appears dead"
-                            );
+                            debug!("Read timeout — requesting connection probe");
                             let _ = event_tx_clone
-                                .send(XmppEvent::Error(
-                                    "Read timeout — connection dead".into(),
-                                ))
+                                .send(XmppEvent::ReadTimeout)
                                 .await;
-                            break;
+                            continue;
                         }
                     }
                 } else {
