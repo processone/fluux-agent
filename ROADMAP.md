@@ -133,7 +133,7 @@ The agent can do things beyond conversation.
 - [x] Session file structure migration (markdown → JSONL)
 - [x] File attachments — receive images/documents via OOB (XEP-0066), download, pass to LLM
 - [x] Release build chain as GitHub Action
-- [ ] Builtin skill: URL fetch and summarize
+- [x] Builtin skill: URL fetch and summarize
 - [ ] Builtin skill: GitHub (issues, PRs, repositories, notifications)
 - [ ] Sub-agent spawning (built-in runtime tool, one level deep)
 - [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides
