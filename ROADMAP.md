@@ -132,6 +132,8 @@ The agent can do things beyond conversation.
 - [x] Builtin skill: web search (Tavily + Perplexity providers)
 - [x] Session file structure migration (markdown → JSONL)
 - [x] File attachments — receive images/documents via OOB (XEP-0066), download, pass to LLM
+- [ ] Release build chain as GitHub Action
+- [ ] Builtin skill: URL fetch and summarize
 - [ ] Builtin skill: GitHub (issues, PRs, repositories, notifications)
 - [ ] Sub-agent spawning (built-in runtime tool, one level deep)
 - [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides
@@ -139,7 +141,6 @@ The agent can do things beyond conversation.
 - [ ] Action plan validation (separate from LLM)
 - [ ] Prompt injection detection — scan incoming messages for adversarial patterns before they reach the LLM
 - [ ] Credential management (env vars, `.env` fallback, per-skill OAuth storage)
-- [ ] Builtin skill: URL fetch and summarize
 - [ ] Agent-generated skills: template-based REST API skills (no code execution)
 - [ ] Bundled REST API skills: JIRA, Front (shipped templates using the REST skill system)
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
@@ -147,7 +148,6 @@ The agent can do things beyond conversation.
 - [ ] Persona packages (bundled identity/personality/instructions, `/persona` commands)
 - [ ] LLM prompt caching (`cache_control` markers for system prompt and history prefix)
 - [ ] Context window management (token-budget history, compaction, memory flush)
-- [ ] Release build chain as GitHub Action
 
 ### Persona packages
 

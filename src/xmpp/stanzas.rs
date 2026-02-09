@@ -738,11 +738,25 @@ fn finalize_message(builder: &StanzaBuilder) -> XmppStanza {
         })
         .collect();
 
-    // OOB body fallback: if body == one of the OOB URLs, strip it
-    let body = if !oob.is_empty() && oob.iter().any(|o| body_raw.trim() == o.url) {
-        String::new()
-    } else {
+    // OOB body stripping: remove OOB URLs from the body text.
+    // XMPP clients include the file URL in <body> as a fallback for clients
+    // that don't support OOB. Since we parse OOB elements, these URLs are
+    // redundant and should be removed from the body text.
+    let body = if oob.is_empty() {
         body_raw.trim().to_string()
+    } else {
+        let mut cleaned = body_raw.trim().to_string();
+        for o in &oob {
+            cleaned = cleaned.replace(&o.url, "");
+        }
+        // Collapse any leftover blank lines and trim
+        let cleaned: String = cleaned
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        cleaned
     };
 
     // Skip if no body and no OOB
@@ -1664,8 +1678,42 @@ mod tests {
                 assert_eq!(msg.from, "user@example.com/mobile");
                 assert!(!msg.oob.is_empty());
                 assert_eq!(msg.oob[0].url, "https://upload.example.com/file.png");
-                // Body should NOT be stripped since it contains more than just the URL
-                assert!(msg.body.contains("Can you read this"));
+                // OOB URL should be stripped from body, leaving only the user's text
+                assert_eq!(msg.body, "Can you read this ?");
+                assert!(!msg.body.contains("https://"));
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_oob_url_stripped_from_multiline_body() {
+        // Body contains both user text and the OOB URL on separate lines
+        let xml = "<message from='user@example.com' to='bot@example.com' type='chat'>\
+                   <body>Test again in debug mode\nhttps://upload.example.com/file.png</body>\
+                   <x xmlns='jabber:x:oob'><url>https://upload.example.com/file.png</url></x>\
+                   </message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.body, "Test again in debug mode");
+                assert!(!msg.body.contains("https://"));
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_oob_multiple_urls_stripped_from_body() {
+        let xml = "<message from='user@example.com' to='bot@example.com' type='chat'>\
+                   <body>Check these\nhttps://upload.example.com/a.png\nhttps://upload.example.com/b.pdf</body>\
+                   <x xmlns='jabber:x:oob'><url>https://upload.example.com/a.png</url></x>\
+                   <x xmlns='jabber:x:oob'><url>https://upload.example.com/b.pdf</url></x>\
+                   </message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.body, "Check these");
+                assert!(!msg.body.contains("https://"));
+                assert_eq!(msg.oob.len(), 2);
             }
             other => panic!("Expected Message, got {other:?}"),
         }

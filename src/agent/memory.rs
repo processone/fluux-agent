@@ -7,6 +7,27 @@ use tracing::info;
 
 use crate::llm::{Message, MessageContent};
 
+/// Structured attachment metadata stored in JSONL session entries.
+///
+/// Represents a file transferred via XMPP HTTP Upload (XEP-0363) / OOB (XEP-0066).
+/// Stored as metadata alongside the message — never embedded in content text.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct Attachment {
+    pub filename: String,
+    pub mime_type: String,
+    pub size: String,
+}
+
+/// Structured reaction metadata stored in JSONL session entries.
+///
+/// Represents an XEP-0444 reaction to a previous message.
+/// Stored as metadata alongside the message — never embedded in content text.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct Reaction {
+    pub message_id: String,
+    pub emojis: Vec<String>,
+}
+
 /// A single entry in a JSONL session file.
 ///
 /// Each line in `history.jsonl` is one of these variants.
@@ -32,6 +53,10 @@ pub enum SessionEntry {
         sender: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         ts: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attachments: Option<Vec<Attachment>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reaction: Option<Reaction>,
     },
 }
 
@@ -292,6 +317,27 @@ impl Memory {
         msg_id: Option<&str>,
         sender: Option<&str>,
     ) -> Result<()> {
+        self.store_message_full(jid, role, content, msg_id, sender, None, None)
+    }
+
+    /// Appends a message with full structured metadata (including attachments
+    /// and reactions) to the JSONL session file.
+    ///
+    /// This is the core storage function. All metadata (msg_id, sender,
+    /// timestamp, attachments, reaction) is stored as structured JSON fields,
+    /// never embedded in the content text.
+    ///
+    /// On first write, a session header line is prepended automatically.
+    pub fn store_message_full(
+        &self,
+        jid: &str,
+        role: &str,
+        content: &str,
+        msg_id: Option<&str>,
+        sender: Option<&str>,
+        attachments: Option<Vec<Attachment>>,
+        reaction: Option<Reaction>,
+    ) -> Result<()> {
         let path = self.user_dir(jid)?.join("history.jsonl");
         let is_new = !path.exists();
 
@@ -311,12 +357,17 @@ impl Memory {
             writeln!(file, "{header_json}")?;
         }
 
+        // Only store non-empty attachment lists
+        let attachments = attachments.filter(|a| !a.is_empty());
+
         let entry = SessionEntry::Message {
             role: role.to_string(),
             content: content.to_string(),
             msg_id: msg_id.map(|s| s.to_string()),
             sender: sender.map(|s| s.to_string()),
             ts: Some(chrono::Utc::now().to_rfc3339()),
+            attachments,
+            reaction,
         };
         let json = serde_json::to_string(&entry)?;
         writeln!(file, "{json}")?;
@@ -640,6 +691,37 @@ impl Memory {
 ///     "alice@muc: Hello everyone!"
 ///
 /// In 1:1 chats, `sender` should be `None` (only one user, no ambiguity).
+/// Reconstructs display content from structured metadata for the LLM.
+///
+/// Metadata (attachments, reactions) is serialized as compact JSON so the
+/// LLM can interpret structured data directly. The content text is appended
+/// after any metadata lines.
+fn build_display_content(
+    content: &str,
+    attachments: &Option<Vec<Attachment>>,
+    reaction: &Option<Reaction>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ref r) = reaction {
+        // Serialize reaction metadata as JSON
+        if let Ok(json) = serde_json::to_string(r) {
+            parts.push(json);
+        }
+    }
+    if let Some(ref atts) = attachments {
+        // Serialize each attachment as JSON
+        for att in atts {
+            if let Ok(json) = serde_json::to_string(att) {
+                parts.push(json);
+            }
+        }
+    }
+    if !content.is_empty() {
+        parts.push(content.to_string());
+    }
+    parts.join("\n")
+}
+
 pub(crate) fn build_message_for_llm(
     role: String,
     content: String,
@@ -683,9 +765,13 @@ fn parse_session(content: &str) -> Vec<Message> {
                 role,
                 content,
                 sender,
+                attachments,
+                reaction,
                 ..
             } => {
-                if content.is_empty() {
+                // Reconstruct display text from structured metadata + content
+                let display = build_display_content(&content, &attachments, &reaction);
+                if display.is_empty() {
                     continue;
                 }
                 // Only pass MUC sender labels to the LLM (for participant attribution).
@@ -696,7 +782,7 @@ fn parse_session(content: &str) -> Vec<Message> {
                     .filter(|s| s.ends_with("@muc"));
                 messages.push(build_message_for_llm(
                     role,
-                    content,
+                    display,
                     muc_sender,
                 ));
             }
@@ -1570,6 +1656,8 @@ not valid json
             msg_id: Some("abc-123".to_string()),
             sender: Some("alice@example.com".to_string()),
             ts: Some("2025-02-08T19:00:00Z".to_string()),
+            attachments: None,
+            reaction: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -1585,12 +1673,15 @@ not valid json
             msg_id: None,
             sender: None,
             ts: None,
+            attachments: None,
+            reaction: None,
         };
 
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("msg_id"));
         assert!(!json.contains("sender"));
         assert!(!json.contains("ts"));
+        assert!(!json.contains("attachments"));
     }
 
     #[test]
@@ -1607,6 +1698,212 @@ not valid json
 
         let parsed: SessionEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, parsed);
+    }
+
+    // ── Attachment metadata tests ──────────────────────────
+
+    #[test]
+    fn test_session_entry_with_attachments_roundtrip() {
+        let entry = SessionEntry::Message {
+            role: "user".to_string(),
+            content: "Check this out".to_string(),
+            msg_id: Some("msg-1".to_string()),
+            sender: Some("alice@example.com".to_string()),
+            ts: Some("2025-02-08T19:00:00Z".to_string()),
+            attachments: Some(vec![Attachment {
+                filename: "photo.png".to_string(),
+                mime_type: "image/png".to_string(),
+                size: "926KB".to_string(),
+            }]),
+            reaction: None,
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"attachments\""));
+        assert!(json.contains("photo.png"));
+        assert!(json.contains("image/png"));
+        assert!(json.contains("926KB"));
+
+        let parsed: SessionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, parsed);
+    }
+
+    #[test]
+    fn test_session_entry_with_reaction_roundtrip() {
+        let entry = SessionEntry::Message {
+            role: "user".to_string(),
+            content: String::new(),
+            msg_id: None,
+            sender: Some("alice@example.com".to_string()),
+            ts: Some("2025-02-08T19:00:00Z".to_string()),
+            attachments: None,
+            reaction: Some(Reaction {
+                message_id: "msg-001".to_string(),
+                emojis: vec!["👍".to_string(), "🎉".to_string()],
+            }),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"reaction\""));
+        assert!(json.contains("msg-001"));
+        assert!(!json.contains("\"attachments\""));
+
+        let parsed: SessionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, parsed);
+    }
+
+    #[test]
+    fn test_session_entry_without_attachments_backward_compat() {
+        // Old JSONL entries without "attachments" or "reaction" fields should parse fine
+        let json = r#"{"type":"message","role":"user","content":"Hello!","msg_id":"abc","sender":"alice@example.com","ts":"2025-02-08T19:00:00Z"}"#;
+        let entry: SessionEntry = serde_json::from_str(json).unwrap();
+        match entry {
+            SessionEntry::Message { attachments, reaction, content, .. } => {
+                assert!(attachments.is_none());
+                assert!(reaction.is_none());
+                assert_eq!(content, "Hello!");
+            }
+            _ => panic!("Expected Message"),
+        }
+    }
+
+    #[test]
+    fn test_store_message_full_with_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        let atts = vec![
+            Attachment {
+                filename: "photo.png".to_string(),
+                mime_type: "image/png".to_string(),
+                size: "926KB".to_string(),
+            },
+            Attachment {
+                filename: "doc.pdf".to_string(),
+                mime_type: "application/pdf".to_string(),
+                size: "1.2MB".to_string(),
+            },
+        ];
+
+        memory
+            .store_message_full(
+                "user@test",
+                "user",
+                "Check these files",
+                Some("msg-1"),
+                Some("user@test"),
+                Some(atts),
+                None,
+            )
+            .unwrap();
+
+        // Verify raw JSONL
+        let raw = fs::read_to_string(dir.path().join("user@test/history.jsonl")).unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 2); // header + message
+        assert!(lines[1].contains("\"attachments\""));
+        assert!(lines[1].contains("photo.png"));
+        assert!(lines[1].contains("doc.pdf"));
+        // Content should be clean text, no attachment labels
+        assert!(!lines[1].contains("[Attached:"));
+    }
+
+    #[test]
+    fn test_get_history_reconstructs_attachment_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        let atts = vec![Attachment {
+            filename: "photo.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size: "926KB".to_string(),
+        }];
+
+        memory
+            .store_message_full(
+                "user@test",
+                "user",
+                "What is this?",
+                None,
+                Some("user@test"),
+                Some(atts),
+                None,
+            )
+            .unwrap();
+
+        let history = memory.get_history("user@test", 10).unwrap();
+        assert_eq!(history.len(), 1);
+        // LLM sees attachment as JSON metadata + text content
+        let msg_text = text(&history[0].content);
+        assert!(msg_text.contains(r#""filename":"photo.png""#));
+        assert!(msg_text.contains(r#""mime_type":"image/png""#));
+        assert!(msg_text.contains("What is this?"));
+    }
+
+    #[test]
+    fn test_get_history_attachment_only_no_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        let atts = vec![Attachment {
+            filename: "photo.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size: "500KB".to_string(),
+        }];
+
+        memory
+            .store_message_full("user@test", "user", "", None, Some("user@test"), Some(atts), None)
+            .unwrap();
+
+        let history = memory.get_history("user@test", 10).unwrap();
+        assert_eq!(history.len(), 1);
+        let msg_text = text(&history[0].content);
+        assert!(msg_text.contains(r#""filename":"photo.png""#));
+        assert!(msg_text.contains(r#""size":"500KB""#));
+    }
+
+    #[test]
+    fn test_build_display_content_no_metadata() {
+        let result = build_display_content("Hello!", &None, &None);
+        assert_eq!(result, "Hello!");
+    }
+
+    #[test]
+    fn test_build_display_content_with_attachments_and_text() {
+        let atts = Some(vec![
+            Attachment {
+                filename: "a.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                size: "200KB".to_string(),
+            },
+            Attachment {
+                filename: "b.pdf".to_string(),
+                mime_type: "application/pdf".to_string(),
+                size: "1MB".to_string(),
+            },
+        ]);
+        let result = build_display_content("Check these", &atts, &None);
+        // Attachments serialized as JSON, then text content
+        assert!(result.contains(r#""filename":"a.jpg""#));
+        assert!(result.contains(r#""filename":"b.pdf""#));
+        assert!(result.ends_with("Check these"));
+    }
+
+    #[test]
+    fn test_build_display_content_reaction() {
+        let reaction = Some(Reaction {
+            message_id: "msg-001".to_string(),
+            emojis: vec!["👍".to_string()],
+        });
+        let result = build_display_content("", &None, &reaction);
+        assert!(result.contains(r#""message_id":"msg-001""#));
+        assert!(result.contains(r#""emojis":["👍"]"#));
+    }
+
+    #[test]
+    fn test_build_display_content_empty() {
+        let result = build_display_content("", &None, &None);
+        assert_eq!(result, "");
     }
 
     // ── store_message_structured integration tests ────────
@@ -1701,26 +1998,30 @@ not valid json
             )
             .unwrap();
 
-        // Store reaction (reaction text in content, no msg_id on the reaction itself)
+        // Store reaction as structured metadata (empty content)
+        let reaction = Reaction {
+            message_id: "msg-001".to_string(),
+            emojis: vec!["👍".to_string()],
+        };
         memory
-            .store_message_structured(
+            .store_message_full(
                 "user@test",
                 "user",
-                "[Reacted to msg_id: msg-001 with 👍]",
+                "",
                 None,
                 Some("alice@test"),
+                None,
+                Some(reaction),
             )
             .unwrap();
 
         let history = memory.get_history("user@test", 10).unwrap();
         assert_eq!(history.len(), 2);
-        // msg_id and 1:1 sender not visible to LLM
         assert_eq!(text(&history[0].content), "Hello!");
-        // Reaction text contains the target msg_id naturally
-        assert_eq!(
-            text(&history[1].content),
-            "[Reacted to msg_id: msg-001 with 👍]"
-        );
+        // Reaction reconstructed from structured metadata as JSON
+        let reaction_text = text(&history[1].content);
+        assert!(reaction_text.contains(r#""message_id":"msg-001""#));
+        assert!(reaction_text.contains(r#""emojis":["👍"]"#));
     }
 
     // ── build_message_for_llm unit tests ─────────────────

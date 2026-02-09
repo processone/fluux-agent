@@ -14,7 +14,7 @@ use crate::xmpp::stanzas::{self, MessageType, OobData, PresenceType};
 
 use crate::skills::{SkillContext, SkillRegistry};
 
-use super::memory::{build_message_for_llm, Memory, WorkspaceContext};
+use super::memory::{build_message_for_llm, Attachment, Memory, Reaction, WorkspaceContext};
 
 /// Maximum number of history messages sent to the LLM
 const MAX_HISTORY: usize = 20;
@@ -103,13 +103,15 @@ impl AgentRuntime {
 
                         // Store ALL room messages to history (for full context)
                         let sender_label = format!("{sender_nick}@muc");
-                        let raw_body = build_history_text(&msg.body, &msg.oob);
-                        if let Err(e) = self.memory.store_message_structured(
+                        let muc_attachments = build_oob_attachments(&msg.oob);
+                        if let Err(e) = self.memory.store_message_full(
                             bare_from,
                             "user",
-                            &raw_body,
+                            &msg.body,
                             msg.id.as_deref(),
                             Some(&sender_label),
+                            muc_attachments,
+                            None,
                         ) {
                             error!("Failed to store MUC message: {e}");
                         }
@@ -392,30 +394,27 @@ impl AgentRuntime {
                         reaction.message_id
                     );
 
-                    // Store reaction in conversation history so the LLM sees it
-                    let reaction_text = format!(
-                        "[Reacted to msg_id: {} with {}]",
-                        reaction.message_id, emojis
-                    );
+                    // Store reaction as structured metadata in history
+                    let reaction_meta = Reaction {
+                        message_id: reaction.message_id.clone(),
+                        emojis: reaction.emojis.clone(),
+                    };
 
-                    if is_muc {
-                        let sender_nick = reaction.from.split('/').nth(1).unwrap_or("unknown");
-                        let sender_label = format!("{sender_nick}@muc");
-                        if let Err(e) = self.memory.store_message_structured(
-                            bare_from,
-                            "user",
-                            &reaction_text,
-                            None,
-                            Some(&sender_label),
-                        ) {
-                            error!("Failed to store MUC reaction: {e}");
-                        }
-                    } else if let Err(e) = self.memory.store_message_structured(
+                    let sender_label = if is_muc {
+                        let nick = reaction.from.split('/').nth(1).unwrap_or("unknown");
+                        format!("{nick}@muc")
+                    } else {
+                        bare_from.to_string()
+                    };
+
+                    if let Err(e) = self.memory.store_message_full(
                         bare_from,
                         "user",
-                        &reaction_text,
+                        "",
                         None,
-                        Some(bare_from),
+                        Some(&sender_label),
+                        None,
+                        Some(reaction_meta),
                     ) {
                         error!("Failed to store reaction: {e}");
                     }
@@ -764,24 +763,33 @@ Commands:\n\
 
 // ── Attachment handling (runs in spawned tasks) ──────────
 
-/// Builds the text stored in conversation history for a message that may have attachments.
+/// Extracts structured attachment metadata from OOB elements.
 ///
-/// When OOB files are present, prepends `[Attached: filename.jpg]` tags so the LLM
-/// has context about what was discussed, without embedding base64 data in history.
-fn build_history_text(body: &str, oob_list: &[OobData]) -> String {
+/// For MUC messages (where files are not downloaded), creates `Attachment` structs
+/// with the filename extracted from the URL. MIME type and size are unknown.
+/// Returns `None` if no OOB elements are present.
+fn build_oob_attachments(oob_list: &[OobData]) -> Option<Vec<Attachment>> {
     if oob_list.is_empty() {
-        return body.to_string();
+        return None;
     }
-
-    let mut parts: Vec<String> = Vec::new();
-    for oob in oob_list {
-        let filename = oob.url.rsplit('/').next().unwrap_or("file");
-        parts.push(format!("[Attached: {filename}]"));
-    }
-    if !body.is_empty() {
-        parts.push(body.to_string());
-    }
-    parts.join("\n")
+    let atts: Vec<Attachment> = oob_list
+        .iter()
+        .map(|oob| {
+            let filename = oob
+                .url
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("file")
+                .to_string();
+            Attachment {
+                filename,
+                mime_type: "unknown".to_string(),
+                size: "unknown".to_string(),
+            }
+        })
+        .collect();
+    Some(atts)
 }
 
 /// Agentic tool-use loop (free function for use from both methods and spawned tasks).
@@ -910,7 +918,7 @@ async fn handle_message_with_attachments(
 
     // Download files sequentially (semaphore inside FileDownloader handles concurrency)
     let mut content_blocks: Vec<InputContentBlock> = Vec::new();
-    let mut attachment_labels: Vec<String> = Vec::new();
+    let mut attachment_meta: Vec<Attachment> = Vec::new();
 
     for (i, oob) in oob_list.iter().enumerate() {
         debug!("Downloading attachment {}/{}: {}", i + 1, oob_list.len(), oob.url);
@@ -920,12 +928,11 @@ async fn handle_message_with_attachments(
                     "Downloaded {} ({}, {})",
                     file.filename, file.mime_type, file.human_size()
                 );
-                attachment_labels.push(format!(
-                    "[Attached: {} ({}, {})]",
-                    file.filename,
-                    file.mime_type,
-                    file.human_size()
-                ));
+                attachment_meta.push(Attachment {
+                    filename: file.filename.clone(),
+                    mime_type: file.mime_type.clone(),
+                    size: file.human_size(),
+                });
                 match file_to_content_block(&file).await {
                     Ok(Some(block)) => content_blocks.push(block),
                     Ok(None) => {
@@ -953,7 +960,11 @@ async fn handle_message_with_attachments(
                 content_blocks.push(InputContentBlock::Text {
                     text: format!("[File download failed: {e}]"),
                 });
-                attachment_labels.push("[Attached: download failed]".to_string());
+                attachment_meta.push(Attachment {
+                    filename: "unknown".to_string(),
+                    mime_type: "unknown".to_string(),
+                    size: "download failed".to_string(),
+                });
             }
         }
     }
@@ -987,17 +998,13 @@ async fn handle_message_with_attachments(
     let (text, input_tokens, output_tokens) =
         agentic_loop(&system_prompt, &mut messages, llm, skills, &context).await?;
 
-    // Store messages in history (text description, not base64)
-    // Content is clean — metadata stored as JSONL fields
-    let labels = attachment_labels.join("\n");
-    let mut history_content = labels;
-    if !body.is_empty() {
-        if !history_content.is_empty() {
-            history_content.push('\n');
-        }
-        history_content.push_str(body);
-    }
-    memory.store_message_structured(bare_jid, "user", &history_content, msg_id, Some(bare_jid))?;
+    // Store messages in history — attachments as structured metadata, not text labels
+    let attachments = if attachment_meta.is_empty() {
+        None
+    } else {
+        Some(attachment_meta)
+    };
+    memory.store_message_full(bare_jid, "user", body, msg_id, Some(bare_jid), attachments, None)?;
 
     let out_id = uuid::Uuid::new_v4().to_string();
     memory.store_message_structured(bare_jid, "assistant", &text, Some(&out_id), None)?;
@@ -1533,36 +1540,28 @@ mod tests {
         assert!(result.contains("Allowed domains: localhost, partner.org"));
     }
 
-    // ── build_history_text tests ─────────────────────────
+    // ── build_oob_attachments tests ─────────────────────
 
     #[test]
-    fn test_build_history_text_no_oob() {
-        let text = build_history_text("Hello!", &[]);
-        assert_eq!(text, "Hello!");
+    fn test_build_oob_attachments_empty() {
+        assert!(build_oob_attachments(&[]).is_none());
     }
 
     #[test]
-    fn test_build_history_text_oob_with_body() {
+    fn test_build_oob_attachments_single() {
         let oob = vec![OobData {
             url: "https://upload.example.com/abc/photo.jpg".to_string(),
             desc: None,
         }];
-        let text = build_history_text("What is this?", &oob);
-        assert_eq!(text, "[Attached: photo.jpg]\nWhat is this?");
+        let atts = build_oob_attachments(&oob).unwrap();
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].filename, "photo.jpg");
+        assert_eq!(atts[0].mime_type, "unknown");
+        assert_eq!(atts[0].size, "unknown");
     }
 
     #[test]
-    fn test_build_history_text_oob_no_body() {
-        let oob = vec![OobData {
-            url: "https://upload.example.com/abc/photo.jpg".to_string(),
-            desc: None,
-        }];
-        let text = build_history_text("", &oob);
-        assert_eq!(text, "[Attached: photo.jpg]");
-    }
-
-    #[test]
-    fn test_build_history_text_multiple_oob() {
+    fn test_build_oob_attachments_multiple() {
         let oob = vec![
             OobData {
                 url: "https://upload.example.com/a.jpg".to_string(),
@@ -1573,47 +1572,21 @@ mod tests {
                 desc: None,
             },
         ];
-        let text = build_history_text("Check these", &oob);
-        assert_eq!(
-            text,
-            "[Attached: a.jpg]\n[Attached: b.pdf]\nCheck these"
-        );
+        let atts = build_oob_attachments(&oob).unwrap();
+        assert_eq!(atts.len(), 2);
+        assert_eq!(atts[0].filename, "a.jpg");
+        assert_eq!(atts[1].filename, "b.pdf");
     }
 
     #[test]
-    fn test_build_history_text_url_no_slashes() {
-        // Pathological URL with no path component
-        let oob = vec![OobData {
-            url: "https://example.com".to_string(),
-            desc: None,
-        }];
-        let text = build_history_text("", &oob);
-        // rsplit('/') on "https://example.com" yields "example.com"
-        assert_eq!(text, "[Attached: example.com]");
-    }
-
-    #[test]
-    fn test_build_history_text_url_trailing_slash() {
+    fn test_build_oob_attachments_trailing_slash_fallback() {
         let oob = vec![OobData {
             url: "https://example.com/files/".to_string(),
             desc: None,
         }];
-        let text = build_history_text("", &oob);
-        // rsplit('/') on trailing slash yields empty string first, fallback to "file"
-        // Actually rsplit('/').next() yields "" (empty) — let's verify behavior
-        assert_eq!(text, "[Attached: ]");
-    }
-
-    #[test]
-    fn test_build_history_text_empty_body_no_oob() {
-        let text = build_history_text("", &[]);
-        assert_eq!(text, "");
-    }
-
-    #[test]
-    fn test_build_history_text_body_with_whitespace_only() {
-        let text = build_history_text("   ", &[]);
-        assert_eq!(text, "   ");
+        let atts = build_oob_attachments(&oob).unwrap();
+        // Trailing slash: rsplit('/').next() yields "", filter(non-empty) → fallback "file"
+        assert_eq!(atts[0].filename, "file");
     }
 
     // ── Status with files test ──────────────────────────
