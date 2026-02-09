@@ -20,31 +20,31 @@ The recommended approach is a **skill that exposes a tool to the LLM**, with str
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        User                                  │
-│  "Can you let Alice know I'll be late to the meeting?"       │
+│                        User                                 │
+│  "Can you let Alice know I'll be late to the meeting?"      │
 └──────────────────────────┬──────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      LLM (Claude)                            │
-│  Decides to use xmpp_send tool                               │
-│  params: { "to": "alice@example.com", "body": "..." }        │
+│                      LLM (Claude)                           │
+│  Decides to use xmpp_send tool                              │
+│  params: { "to": "alice@example.com", "body": "..." }       │
 └──────────────────────────┬──────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Guardrail Layer                           │
-│  ✓ Contact in allowlist?                                     │
-│  ✓ Rate limit not exceeded?                                  │
-│  ✓ First message to contact? → Requires confirmation         │
-│  ✓ Content policy check?                                     │
+│                    Guardrail Layer                          │
+│  ✓ Contact in allowlist?                                    │
+│  ✓ Rate limit not exceeded?                                 │
+│  ✓ First message to contact? → Requires confirmation        │
+│  ✓ Content policy check?                                    │
 └──────────────────────────┬──────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    XMPP Send Skill                           │
-│  Sends message via established XMPP connection               │
-│  Logs action to audit trail                                  │
+│                    XMPP Send Skill                          │
+│  Sends message via established XMPP connection              │
+│  Logs action to audit trail                                 │
 └──────────────────────────┬──────────────────────────────────┘
                            │
                            ▼
