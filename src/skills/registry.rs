@@ -81,8 +81,17 @@ impl Default for SkillRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::SkillContext;
     use async_trait::async_trait;
     use serde_json::json;
+    use std::path::PathBuf;
+
+    fn test_context() -> SkillContext {
+        SkillContext {
+            jid: "test@localhost".to_string(),
+            base_path: PathBuf::from("/tmp/test"),
+        }
+    }
 
     /// Test-only skill implementation for registry tests.
     struct DummySkill {
@@ -118,7 +127,7 @@ mod tests {
         fn parameters_schema(&self) -> serde_json::Value {
             self.schema.clone()
         }
-        async fn execute(&self, params: serde_json::Value) -> anyhow::Result<String> {
+        async fn execute(&self, params: serde_json::Value, _context: &SkillContext) -> anyhow::Result<String> {
             let query = params["query"].as_str().unwrap_or("none");
             Ok(format!("result for: {query}"))
         }
@@ -215,8 +224,9 @@ mod tests {
         registry.register(Box::new(DummySkill::new("search")));
 
         let skill = registry.get("search").unwrap();
+        let ctx = test_context();
         let result = skill
-            .execute(json!({"query": "hello world"}))
+            .execute(json!({"query": "hello world"}), &ctx)
             .await
             .unwrap();
         assert_eq!(result, "result for: hello world");
@@ -246,7 +256,7 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 json!({"type": "object", "properties": {}})
             }
-            async fn execute(&self, _params: serde_json::Value) -> anyhow::Result<String> {
+            async fn execute(&self, _params: serde_json::Value, _context: &SkillContext) -> anyhow::Result<String> {
                 Err(anyhow::anyhow!("intentional failure"))
             }
         }
@@ -255,7 +265,8 @@ mod tests {
         registry.register(Box::new(FailSkill));
 
         let skill = registry.get("fail").unwrap();
-        let result = skill.execute(json!({})).await;
+        let ctx = test_context();
+        let result = skill.execute(json!({}), &ctx).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "intentional failure");
     }

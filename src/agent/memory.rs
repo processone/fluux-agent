@@ -35,6 +35,16 @@ pub enum SessionEntry {
     },
 }
 
+/// A single knowledge entry in a JID's knowledge store.
+///
+/// Stored as one JSON object per line in `knowledge.jsonl`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct KnowledgeEntry {
+    key: String,
+    content: String,
+    ts: String,
+}
+
 /// Aggregated workspace context for system prompt assembly.
 ///
 /// Global files (instructions, identity, personality) are shared across all JIDs.
@@ -58,6 +68,7 @@ pub struct WorkspaceContext {
 ///   {base_path}/{jid}/history.jsonl         — current session (JSONL format)
 ///   {base_path}/{jid}/user.md               — what the agent knows about the user
 ///   {base_path}/{jid}/memory.md             — long-term notes about the user
+///   {base_path}/{jid}/knowledge.jsonl      — structured knowledge store (key/value)
 ///   {base_path}/{jid}/sessions/             — archived sessions
 ///   {base_path}/{jid}/sessions/{ts}.jsonl   — archived session file
 pub struct Memory {
@@ -95,6 +106,12 @@ impl Memory {
         Ok(Self {
             base_path: path.to_path_buf(),
         })
+    }
+
+    /// Returns the base path of the memory store.
+    /// Used to construct `SkillContext` for skill execution.
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
     }
 
     /// Returns the per-user directory, creating it if needed
@@ -410,6 +427,14 @@ impl Memory {
             erased.push("memory".to_string());
         }
 
+        // Erase knowledge store
+        let knowledge_jsonl = user_dir.join("knowledge.jsonl");
+        if knowledge_jsonl.exists() {
+            let count = self.knowledge_count(jid).unwrap_or(0);
+            fs::remove_file(&knowledge_jsonl)?;
+            erased.push(format!("{count} knowledge entries"));
+        }
+
         // Erase downloaded files
         let files_dir = user_dir.join("files");
         if files_dir.exists() {
@@ -487,6 +512,116 @@ impl Memory {
             .count();
 
         Ok(count)
+    }
+
+    // ── Knowledge store ──────────────────────────────────
+
+    /// Loads all knowledge entries from a JID's knowledge store.
+    /// Returns an empty Vec if the file does not exist.
+    fn load_knowledge(&self, jid: &str) -> Result<Vec<KnowledgeEntry>> {
+        let path = self.base_path.join(jid).join("knowledge.jsonl");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = fs::read_to_string(&path)?;
+        let mut entries = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<KnowledgeEntry>(line) {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Stores or updates a knowledge entry for a JID.
+    ///
+    /// If `key` already exists, the file is rewritten with the updated value.
+    /// If `key` is new, a line is appended.
+    /// File: `{base_path}/{jid}/knowledge.jsonl`
+    pub fn knowledge_store(&self, jid: &str, key: &str, content: &str) -> Result<()> {
+        let dir = self.user_dir(jid)?;
+        let path = dir.join("knowledge.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+
+        let new_entry = KnowledgeEntry {
+            key: key.to_string(),
+            content: content.to_string(),
+            ts,
+        };
+
+        let mut entries = self.load_knowledge(jid)?;
+
+        // Check if key already exists
+        if let Some(pos) = entries.iter().position(|e| e.key == key) {
+            // Overwrite: replace entry and rewrite file
+            entries[pos] = new_entry;
+            let mut file = fs::File::create(&path)?;
+            for entry in &entries {
+                let json = serde_json::to_string(entry)?;
+                writeln!(file, "{json}")?;
+            }
+        } else {
+            // New key: append
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
+            let json = serde_json::to_string(&new_entry)?;
+            writeln!(file, "{json}")?;
+        }
+
+        Ok(())
+    }
+
+    /// Retrieves a specific knowledge entry by exact key match.
+    /// Returns `None` if the key does not exist.
+    pub fn knowledge_get(&self, jid: &str, key: &str) -> Result<Option<String>> {
+        let entries = self.load_knowledge(jid)?;
+        Ok(entries.into_iter().find(|e| e.key == key).map(|e| e.content))
+    }
+
+    /// Searches knowledge entries by keyword/substring match across keys and content.
+    ///
+    /// If `query` is empty, returns all entries.
+    /// Returns a formatted string with numbered results.
+    pub fn knowledge_search(&self, jid: &str, query: &str) -> Result<String> {
+        let entries = self.load_knowledge(jid)?;
+
+        if entries.is_empty() {
+            return Ok("No knowledge entries stored yet.".to_string());
+        }
+
+        let query_lower = query.to_lowercase();
+        let matches: Vec<&KnowledgeEntry> = if query.is_empty() {
+            entries.iter().collect()
+        } else {
+            entries
+                .iter()
+                .filter(|e| {
+                    e.key.to_lowercase().contains(&query_lower)
+                        || e.content.to_lowercase().contains(&query_lower)
+                })
+                .collect()
+        };
+
+        if matches.is_empty() {
+            return Ok(format!("No knowledge entries found matching: {query}"));
+        }
+
+        let mut result = format!("Found {} knowledge entries:\n", matches.len());
+        for (i, entry) in matches.iter().enumerate() {
+            result.push_str(&format!("{}. [{}] {}\n", i + 1, entry.key, entry.content));
+        }
+        Ok(result)
+    }
+
+    /// Returns the number of knowledge entries for a JID.
+    pub fn knowledge_count(&self, jid: &str) -> Result<usize> {
+        Ok(self.load_knowledge(jid)?.len())
     }
 }
 
@@ -1699,5 +1834,199 @@ not valid json
             text(&messages[3].content),
             "alice@muc: [Reacted to msg_id: out-001 with 👍]"
         );
+    }
+
+    // ── Knowledge store tests ──────────────────────────────
+
+    #[test]
+    fn test_knowledge_store_and_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        memory.knowledge_store(jid, "language", "Rust").unwrap();
+        let result = memory.knowledge_get(jid, "language").unwrap();
+        assert_eq!(result, Some("Rust".to_string()));
+    }
+
+    #[test]
+    fn test_knowledge_store_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        memory.knowledge_store(jid, "language", "Python").unwrap();
+        memory.knowledge_store(jid, "language", "Rust").unwrap();
+
+        let result = memory.knowledge_get(jid, "language").unwrap();
+        assert_eq!(result, Some("Rust".to_string()));
+
+        // File should have only one entry (not two)
+        assert_eq!(memory.knowledge_count(jid).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_knowledge_get_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        let result = memory.knowledge_get(jid, "missing").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_knowledge_search_by_keyword() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        memory.knowledge_store(jid, "language", "Prefers Rust over Go").unwrap();
+        memory.knowledge_store(jid, "timezone", "Europe/Paris").unwrap();
+        memory.knowledge_store(jid, "project", "Building a web server").unwrap();
+
+        let result = memory.knowledge_search(jid, "Rust").unwrap();
+        assert!(result.contains("language"));
+        assert!(result.contains("Prefers Rust over Go"));
+        assert!(!result.contains("timezone"));
+    }
+
+    #[test]
+    fn test_knowledge_search_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        memory.knowledge_store(jid, "language", "Prefers Rust").unwrap();
+
+        let result = memory.knowledge_search(jid, "rust").unwrap();
+        assert!(result.contains("language"));
+        assert!(result.contains("Prefers Rust"));
+
+        let result = memory.knowledge_search(jid, "RUST").unwrap();
+        assert!(result.contains("language"));
+    }
+
+    #[test]
+    fn test_knowledge_search_empty_query_lists_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        memory.knowledge_store(jid, "language", "Rust").unwrap();
+        memory.knowledge_store(jid, "timezone", "UTC").unwrap();
+
+        let result = memory.knowledge_search(jid, "").unwrap();
+        assert!(result.contains("language"));
+        assert!(result.contains("timezone"));
+        assert!(result.contains("2 knowledge entries"));
+    }
+
+    #[test]
+    fn test_knowledge_search_no_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        memory.knowledge_store(jid, "language", "Rust").unwrap();
+
+        let result = memory.knowledge_search(jid, "python").unwrap();
+        assert!(result.contains("No knowledge entries found matching: python"));
+    }
+
+    #[test]
+    fn test_knowledge_store_jsonl_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        memory.knowledge_store(jid, "lang", "Rust").unwrap();
+        memory.knowledge_store(jid, "tz", "UTC").unwrap();
+
+        let path = dir.path().join(jid).join("knowledge.jsonl");
+        let content = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        // Each line is valid JSON with key, content, ts fields
+        let entry1: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(entry1["key"], "lang");
+        assert_eq!(entry1["content"], "Rust");
+        assert!(entry1["ts"].as_str().is_some());
+
+        let entry2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(entry2["key"], "tz");
+        assert_eq!(entry2["content"], "UTC");
+    }
+
+    #[test]
+    fn test_knowledge_jid_isolation() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        memory.knowledge_store("alice@example.com", "color", "blue").unwrap();
+        memory.knowledge_store("bob@example.com", "color", "red").unwrap();
+
+        let alice = memory.knowledge_get("alice@example.com", "color").unwrap();
+        let bob = memory.knowledge_get("bob@example.com", "color").unwrap();
+
+        assert_eq!(alice, Some("blue".to_string()));
+        assert_eq!(bob, Some("red".to_string()));
+    }
+
+    #[test]
+    fn test_knowledge_room_jid_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let room_jid = "room@conference.example.com";
+
+        memory.knowledge_store(room_jid, "topic", "Rust development").unwrap();
+        let result = memory.knowledge_get(room_jid, "topic").unwrap();
+        assert_eq!(result, Some("Rust development".to_string()));
+    }
+
+    #[test]
+    fn test_forget_erases_knowledge() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        memory.knowledge_store(jid, "language", "Rust").unwrap();
+        assert_eq!(memory.knowledge_count(jid).unwrap(), 1);
+
+        let result = memory.forget(jid).unwrap();
+        assert!(result.contains("knowledge"));
+
+        assert_eq!(memory.knowledge_count(jid).unwrap(), 0);
+        assert_eq!(memory.knowledge_get(jid, "language").unwrap(), None);
+    }
+
+    #[test]
+    fn test_knowledge_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        assert_eq!(memory.knowledge_count(jid).unwrap(), 0);
+
+        memory.knowledge_store(jid, "a", "1").unwrap();
+        assert_eq!(memory.knowledge_count(jid).unwrap(), 1);
+
+        memory.knowledge_store(jid, "b", "2").unwrap();
+        assert_eq!(memory.knowledge_count(jid).unwrap(), 2);
+
+        // Overwrite doesn't increase count
+        memory.knowledge_store(jid, "a", "updated").unwrap();
+        assert_eq!(memory.knowledge_count(jid).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_knowledge_search_no_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+        let jid = "alice@example.com";
+
+        let result = memory.knowledge_search(jid, "anything").unwrap();
+        assert!(result.contains("No knowledge entries stored yet"));
     }
 }

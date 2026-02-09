@@ -141,6 +141,7 @@ The agent can do things beyond conversation.
 - [ ] Credential management (env vars, `.env` fallback, per-skill OAuth storage)
 - [ ] Builtin skill: URL fetch and summarize
 - [ ] Agent-generated skills: template-based REST API skills (no code execution)
+- [ ] Bundled REST API skills: JIRA, Front (shipped templates using the REST skill system)
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
 - [ ] Cost estimation and per-JID quota (token tracking, usage limits, `/usage` command)
 - [ ] Persona packages (bundled identity/personality/instructions, `/persona` commands)
@@ -416,6 +417,39 @@ Agent: I don't have a Front skill yet. Let me create one.
 | `/skill info <name>`    | Show skill definition and capabilities |
 | `/skill disable <name>` | Disable a generated skill              |
 | `/skill delete <name>`  | Remove a generated skill               |
+
+#### Bundled REST API skills
+
+The agent ships with pre-built REST API skill templates for common services. These use the same declarative system as agent-generated skills but are curated and tested:
+
+| Skill | Service | Operations |
+|-------|---------|------------|
+| `jira` | Atlassian JIRA | List/search issues, get issue details, create issues, add comments, transition status |
+| `front` | Front | List conversations, get conversation details, reply to conversations, list inboxes |
+
+**Configuration:**
+
+```toml
+[skills.jira]
+enabled = true
+host = "https://yourcompany.atlassian.net"
+email = "${JIRA_EMAIL}"
+api_token = "${JIRA_API_TOKEN}"
+default_project = "PROJ"          # Optional: default project key
+
+[skills.front]
+enabled = true
+api_key = "${FRONT_API_KEY}"
+```
+
+**Why bundled instead of native:**
+
+- **Simpler maintenance** — REST API changes only require updating TOML templates, not recompiling
+- **User-extensible** — Users can copy and modify bundled skills for custom workflows
+- **Demonstrates the system** — Shows how agent-generated skills work with real-world APIs
+- **Lower priority APIs** — GitHub warrants native integration; JIRA and Front are common but not universal
+
+The bundled skills live in `data/skills/` and are registered at startup alongside native skills.
 
 #### v0.3: Supervised proposals
 

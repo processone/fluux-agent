@@ -87,6 +87,11 @@ path = "./data/memory"
 # api_key = "${PERPLEXITY_API_KEY}" # Get your key at https://perplexity.ai
 # model = "sonar"                   # "sonar" (default) or "sonar-pro"
 
+# Memory/knowledge store — lets the LLM store and recall facts per user/room.
+# No API key needed — uses local filesystem only.
+# [skills.memory]
+# enabled = true
+
 # --- Future sections (v0.2+) ---
 
 # [sandbox]

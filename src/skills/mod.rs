@@ -1,7 +1,20 @@
 pub mod builtin;
 pub mod registry;
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
+
+/// Runtime context passed to skill execution.
+///
+/// Provides the invoking JID and memory base path so skills
+/// can scope their state per-conversation-partner.
+pub struct SkillContext {
+    /// Bare JID of the conversation partner (user or room).
+    pub jid: String,
+    /// Base path of the memory store (same as `Memory.base_path`).
+    pub base_path: PathBuf,
+}
 
 /// A skill that the LLM can invoke via tool_use.
 ///
@@ -29,7 +42,12 @@ pub trait Skill: Send + Sync {
 
     /// Execute the skill with the given parameters and return a text result.
     /// The returned string is sent back to the LLM as a `tool_result`.
-    async fn execute(&self, params: serde_json::Value) -> anyhow::Result<String>;
+    /// The `context` provides the invoking JID and memory base path.
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        context: &SkillContext,
+    ) -> anyhow::Result<String>;
 }
 
 pub use registry::SkillRegistry;

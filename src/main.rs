@@ -19,7 +19,7 @@ use crate::agent::runtime::AgentRuntime;
 use crate::backoff::Backoff;
 use crate::config::Config;
 use crate::llm::{AnthropicClient, LlmClient, OllamaClient};
-use crate::skills::builtin::WebSearchSkill;
+use crate::skills::builtin::{MemoryRecallSkill, MemoryStoreSkill, WebSearchSkill};
 use crate::skills::SkillRegistry;
 use crate::xmpp::component::DisconnectReason;
 
@@ -162,6 +162,14 @@ async fn main() -> Result<()> {
             ws_config.provider
         );
         skills.register(Box::new(WebSearchSkill::new(ws_config)));
+    }
+
+    if let Some(ref mem_config) = config.skills.memory {
+        if mem_config.enabled {
+            info!("Registering builtin skills: memory_store, memory_recall");
+            skills.register(Box::new(MemoryStoreSkill));
+            skills.register(Box::new(MemoryRecallSkill));
+        }
     }
 
     info!("Skills: {} registered", skills.len());

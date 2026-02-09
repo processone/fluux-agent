@@ -12,7 +12,7 @@ use crate::llm::{
 use crate::xmpp::component::{ChatState, DisconnectReason, XmppCommand, XmppEvent};
 use crate::xmpp::stanzas::{self, MessageType, OobData, PresenceType};
 
-use crate::skills::SkillRegistry;
+use crate::skills::{SkillContext, SkillRegistry};
 
 use super::memory::{build_message_for_llm, Memory, WorkspaceContext};
 
@@ -561,19 +561,26 @@ impl AgentRuntime {
             String::new()
         };
 
+        let knowledge_count = self.memory.knowledge_count(bare_jid)?;
+        let knowledge_info = if knowledge_count > 0 {
+            format!("\nKnowledge entries: {knowledge_count}")
+        } else {
+            String::new()
+        };
+
         // Context-specific section: room info vs. user info
         let context_info = if is_room {
             format!(
                 "Room: {bare_jid}\n\
                  Room messages: {msg_count}\n\
-                 Archived sessions: {session_count}{file_info}"
+                 Archived sessions: {session_count}{file_info}{knowledge_info}"
             )
         } else {
             let has_profile = self.memory.has_user_profile(bare_jid)?;
             let has_memory = self.memory.get_user_memory(bare_jid)?.is_some();
             format!(
                 "Your session: {msg_count} messages\n\
-                 Archived sessions: {session_count}{file_info}\n\
+                 Archived sessions: {session_count}{file_info}{knowledge_info}\n\
                  User profile: {}\n\
                  User memory: {}",
                 yn(has_profile),
@@ -639,8 +646,13 @@ Commands:\n\
         &self,
         system_prompt: &str,
         messages: &mut Vec<Message>,
+        jid: &str,
     ) -> Result<(String, u32, u32)> {
-        agentic_loop(system_prompt, messages, self.llm.as_ref(), &self.skills).await
+        let context = SkillContext {
+            jid: jid.to_string(),
+            base_path: self.memory.base_path().to_path_buf(),
+        };
+        agentic_loop(system_prompt, messages, self.llm.as_ref(), &self.skills, &context).await
     }
 
     /// Processes an incoming message and produces a response via LLM.
@@ -666,7 +678,7 @@ Commands:\n\
 
         // Agentic loop (returns immediately if no tools registered)
         let (text, input_tokens, output_tokens) =
-            self.call_llm_with_tools(&system_prompt, &mut messages).await?;
+            self.call_llm_with_tools(&system_prompt, &mut messages, bare_jid).await?;
 
         // Generate outbound message id
         let out_id = uuid::Uuid::new_v4().to_string();
@@ -698,7 +710,7 @@ Commands:\n\
         let mut messages = history;
 
         let (text, input_tokens, output_tokens) =
-            self.call_llm_with_tools(&system_prompt, &mut messages).await?;
+            self.call_llm_with_tools(&system_prompt, &mut messages, jid).await?;
 
         info!(
             "Reaction response to {jid}: {} chars ({} tokens used)",
@@ -725,7 +737,7 @@ Commands:\n\
 
         // Agentic loop (returns immediately if no tools registered)
         let (text, input_tokens, output_tokens) =
-            self.call_llm_with_tools(&system_prompt, &mut messages).await?;
+            self.call_llm_with_tools(&system_prompt, &mut messages, room_jid).await?;
 
         info!(
             "MUC response to {room_jid}: {} chars ({} tokens used)",
@@ -788,6 +800,7 @@ async fn agentic_loop(
     messages: &mut Vec<Message>,
     llm: &dyn LlmClient,
     skills: &SkillRegistry,
+    context: &SkillContext,
 ) -> Result<(String, u32, u32)> {
     // Build tool definitions (None if no skills registered)
     let tool_defs: Option<Vec<ToolDefinition>> = if skills.is_empty() {
@@ -832,7 +845,7 @@ async fn agentic_loop(
         let mut result_blocks = Vec::new();
         for tc in &response.tool_calls {
             let result_content = match skills.get(&tc.name) {
-                Some(skill) => match skill.execute(tc.input.clone()).await {
+                Some(skill) => match skill.execute(tc.input.clone(), context).await {
                     Ok(output) => output,
                     Err(e) => {
                         warn!("Skill {} failed: {e}", tc.name);
@@ -967,8 +980,12 @@ async fn handle_message_with_attachments(
     debug!("Calling LLM with {} messages (including attachment)", messages.len());
 
     // Agentic loop (returns immediately if no tools registered)
+    let context = SkillContext {
+        jid: bare_jid.to_string(),
+        base_path: memory.base_path().to_path_buf(),
+    };
     let (text, input_tokens, output_tokens) =
-        agentic_loop(&system_prompt, &mut messages, llm, skills).await?;
+        agentic_loop(&system_prompt, &mut messages, llm, skills, &context).await?;
 
     // Store messages in history (text description, not base64)
     // Content is clean — metadata stored as JSONL fields
@@ -1632,7 +1649,7 @@ mod tests {
             fn name(&self) -> &str { self.0 }
             fn description(&self) -> &str { "" }
             fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }
-            async fn execute(&self, _: serde_json::Value) -> anyhow::Result<String> {
+            async fn execute(&self, _: serde_json::Value, _context: &crate::skills::SkillContext) -> anyhow::Result<String> {
                 Ok(String::new())
             }
         }

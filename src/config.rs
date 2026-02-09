@@ -111,6 +111,19 @@ pub struct MemoryConfig {
 pub struct SkillsConfig {
     /// Web search skill configuration.
     pub web_search: Option<WebSearchConfig>,
+    /// Memory (knowledge store) skill configuration.
+    pub memory: Option<MemorySkillConfig>,
+}
+
+/// Configuration for the `memory_store` and `memory_recall` builtin skills.
+///
+/// These skills let the LLM store and retrieve per-JID knowledge entries.
+/// No API keys needed — uses local filesystem only.
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemorySkillConfig {
+    /// Enable the memory skills. Must be `true` to register them.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Configuration for the `web_search` builtin skill.
