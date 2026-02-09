@@ -6,7 +6,7 @@ Items marked **done** are merged. Items marked **next** are the current priority
 
 ---
 
-## v0.1 — Foundation (current)
+## v0.1 — Foundation
 
 The minimum viable agent: connect, authenticate, converse, remember.
 
@@ -17,9 +17,6 @@ The minimum viable agent: connect, authenticate, converse, remember.
 - [x] Allowed JID authorization
 - [x] Chat state notification filtering (XEP-0085)
 - [x] Configuration with environment variable expansion
-
-### v0.1 — remaining
-
 - [x] Conversation sessions (`/new`, `/reset`, session archival)
 - [x] Slash commands (runtime-intercepted, never reach the LLM)
 - [x] Presence subscription for allowed JIDs (auto-subscribe + auto-accept)
@@ -32,9 +29,9 @@ The minimum viable agent: connect, authenticate, converse, remember.
 
 Implemented: the agent supports discrete sessions per user.
 
-- **`/new` and `/reset`** — Archives the current `history.md` into `sessions/{YYYYMMDD-HHMMSS}.md` and starts a fresh conversation. The LLM sees an empty history.
+- **`/new` and `/reset`** — Archives the current `history.jsonl` into `sessions/{YYYYMMDD-HHMMSS}.jsonl` and starts a fresh conversation. The LLM sees an empty history.
 - **`/forget`** — Erases the current session history and user context. Archived sessions are preserved.
-- **Memory layout** — `{jid}/history.md` (current session), `{jid}/sessions/*.md` (archived), `{jid}/context.md` (user context). All human-readable markdown.
+- **Memory layout** — `{jid}/history.jsonl` (current session, JSONL format), `{jid}/sessions/*.jsonl` (archived), `{jid}/user.md` (user profile), `{jid}/memory.md` (long-term notes).
 - **`/status`** — Reports message count in current session and number of archived sessions.
 
 #### Future enhancements (not yet implemented)
@@ -129,16 +126,18 @@ dev_command_jids = ["admin@localhost"]
 
 The agent can do things beyond conversation.
 
-- [ ] Skill trait and registry
-- [ ] LLM tool use integration (agentic loop)
+- [x] Skill trait and registry
+- [x] LLM tool use integration (agentic loop)
+- [x] `LlmClient` trait + Ollama provider (local models via Ollama API)
+- [x] Builtin skill: web search (Tavily + Perplexity providers)
+- [x] Session file structure migration (markdown → JSONL)
+- [x] File attachments — receive images/documents via OOB (XEP-0066), download, pass to LLM
 - [ ] Sub-agent spawning (built-in runtime tool, one level deep)
 - [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides
-- [ ] `LlmClient` trait + Ollama provider (local models via Ollama API)
 - [ ] Declarative skill capabilities (TOML manifests)
 - [ ] Action plan validation (separate from LLM)
 - [ ] Prompt injection detection — scan incoming messages for adversarial patterns before they reach the LLM
 - [ ] Credential management (env vars, `.env` fallback, per-skill OAuth storage)
-- [ ] Builtin skill: web search
 - [ ] Builtin skill: URL fetch and summarize
 - [ ] Agent-generated skills: template-based REST API skills (no code execution)
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
@@ -345,11 +344,11 @@ The agent can create new skills on-the-fly when it encounters an API or service 
 
 #### Evolution across versions
 
-| Version | Capability | Safety Mechanism |
-|---------|------------|------------------|
-| v0.2 | Template-based REST skills | No code execution — declarative only |
-| v0.3 | Supervised proposals | Human approval gate before enabling |
-| v0.4 | Wasm code generation | Sandbox enforces capability restrictions |
+| Version | Capability                 | Safety Mechanism                         |
+|---------|----------------------------|------------------------------------------|
+| v0.2    | Template-based REST skills | No code execution — declarative only     |
+| v0.3    | Supervised proposals       | Human approval gate before enabling      |
+| v0.4    | Wasm code generation       | Sandbox enforces capability restrictions |
 
 #### v0.2: Template-based REST skills
 
@@ -410,12 +409,12 @@ Agent: I don't have a Front skill yet. Let me create one.
 
 **Slash commands:**
 
-| Command | Description |
-|---------|-------------|
-| `/skills` | List all skills (builtin + generated) |
-| `/skill info <name>` | Show skill definition and capabilities |
-| `/skill disable <name>` | Disable a generated skill |
-| `/skill delete <name>` | Remove a generated skill |
+| Command                 | Description                            |
+|-------------------------|----------------------------------------|
+| `/skills`               | List all skills (builtin + generated)  |
+| `/skill info <name>`    | Show skill definition and capabilities |
+| `/skill disable <name>` | Disable a generated skill              |
+| `/skill delete <name>`  | Remove a generated skill               |
 
 #### v0.3: Supervised proposals
 
@@ -475,12 +474,12 @@ The Wasm sandbox enforces declared capabilities at runtime — the code physical
 
 #### Security considerations
 
-| Risk | v0.2 Mitigation | v0.3 Mitigation | v0.4 Mitigation |
-|------|-----------------|-----------------|-----------------|
-| Arbitrary code execution | No code — templates only | Human review before enable | Wasm sandbox |
-| Prompt injection → malicious skill | Limited to REST calls | Human approval gate | Capability enforcement |
-| Data exfiltration | Declared endpoints only | Human reviews network access | Sandbox + audit logging |
-| Credential theft | Credentials never in generated code | Credential access logged | Sandbox isolates credentials |
+| Risk                               | v0.2 Mitigation                     | v0.3 Mitigation              | v0.4 Mitigation              |
+|------------------------------------|-------------------------------------|------------------------------|------------------------------|
+| Arbitrary code execution           | No code — templates only            | Human review before enable   | Wasm sandbox                 |
+| Prompt injection → malicious skill | Limited to REST calls               | Human approval gate          | Capability enforcement       |
+| Data exfiltration                  | Declared endpoints only             | Human reviews network access | Sandbox + audit logging      |
+| Credential theft                   | Credentials never in generated code | Credential access logged     | Sandbox isolates credentials |
 
 #### Storage layout
 
@@ -575,16 +574,14 @@ The runtime validates that required credentials are available before enabling th
 - **No disk storage by default** — API keys from env vars are never written to disk; only OAuth flows that require persistence use disk storage
 - **Encryption at rest (future)** — Optional encryption of credential files using a master key from env var or system keychain
 
-### Session file structure migration
+### Session file structure migration ✓
 
-Currently, conversation history is stored as flat markdown files (`history.md`) with inline metadata tags (`[msg_id: ...]`, `[Reacted to msg_id: ...]`). This works well for text-only conversations with lightweight annotations.
+Implemented: conversation history migrated from markdown to JSONL format.
 
-When tool use is introduced (agentic loop with `tool_use` → `tool_result` chains), markdown may no longer be sufficient:
-- Tool calls and results have structured parameters that don't map cleanly to markdown
-- Multi-modal content blocks (images, documents) need typed representation
-- The LLM context replay needs exact structure preservation (role, content type, tool_use_id)
-
-**Migration plan:** When tool use is implemented, migrate session storage from markdown to JSONL (one JSON object per message). The `parse_history()` and `store_message()` functions are the only read/write points — changing the format requires updating only these two functions. Archived sessions (`sessions/*.md`) can remain as markdown; only the active `history.md` needs to change.
+- **JSONL format** — Session files are `history.jsonl` with one JSON object per line. `SessionEntry` enum: `Header` (version, created, jid) and `Message` (role, content, msg_id, sender, ts).
+- **Structured metadata** — Message ID, sender, and timestamp are stored as structured JSON fields, never embedded in content text.
+- **Clean LLM context** — `build_message_for_llm()` constructs messages with only conversational content (no runtime metadata). MUC sender attribution uses text prefix (`"alice@muc: Hello!"`); 1:1 messages have no prefix.
+- **Backward compatibility** — `session_count()` counts both `.jsonl` and `.md` files. Old markdown archives are preserved.
 
 ### LLM prompt caching
 
@@ -704,122 +701,26 @@ history_token_budget = 120000    # busy room, needs more context
 4. **Memory flush** — long-term fact extraction tied to compaction
 5. **Per-room/per-user overrides** — fine-tuning for specific use cases
 
-### How skills are exposed to the LLM
+### Skills system and agentic loop ✓
 
-Skills are **LLM tools**. Modern LLMs (Claude, GPT-4, etc.) have native tool/function calling: the model receives a list of tool definitions (name, description, parameters as JSON Schema), and can request tool invocations as part of its response. The agent runtime orchestrates the loop.
+Implemented: skills are LLM tools with a full agentic loop.
 
-The architecture has three layers:
-
-```
-┌──────────────────────────────────────────────────┐
-│                  LLM (Claude API)                │
-│  Receives: system prompt + messages + tools[]    │
-│  Returns:  text | tool_use(name, params)         │
-└──────────────────┬───────────────────────────────┘
-                   │
-┌──────────────────▼───────────────────────────────┐
-│              Agent Runtime (runtime.rs)          │
-│  1. Builds tool definitions from SkillRegistry   │
-│  2. Sends to LLM as `tools` parameter            │
-│  3. If LLM returns tool_use → validate → execute │
-│  4. Feeds tool_result back → LLM continues       │
-│  5. Loop until LLM returns text (final answer)   │
-└──────────────────┬───────────────────────────────┘
-                   │
-┌──────────────────▼───────────────────────────────┐
-│              Skill Registry                      │
-│  - Discovers available skills (builtin + Wasm)   │
-│  - Each skill provides: name, description,       │
-│    parameter schema, capability requirements     │
-│  - Executes skills and returns results           │
-└──────────────────────────────────────────────────┘
-```
-
-#### The Skill trait
-
-Each skill implements a common trait:
-
-```rust
-#[async_trait]
-pub trait Skill: Send + Sync {
-    /// Unique identifier (e.g. "web_search", "url_fetch")
-    fn name(&self) -> &str;
-
-    /// Human-readable description (shown to the LLM)
-    fn description(&self) -> &str;
-
-    /// JSON Schema describing accepted parameters
-    fn parameters_schema(&self) -> serde_json::Value;
-
-    /// Required capabilities (validated against TOML manifest)
-    fn capabilities(&self) -> Vec<String>;
-
-    /// Execute the skill with the given parameters
-    async fn execute(&self, params: serde_json::Value) -> Result<String>;
-}
-```
-
-#### The agentic loop with tool use
-
-Today, `runtime.rs` does a single LLM call and returns the text. With skills, it becomes a loop:
-
-```
-User message
-    ↓
-Build tools[] from SkillRegistry
-    ↓
-Call LLM(system, messages, tools)
-    ↓
-┌─── LLM response ────┐
-│                     │
-│  text block?  ──────┼──→ Send to user (done)
-│                     │
-│  tool_use block? ───┼──→ Validate against capabilities
-│                     │       ↓
-│                     │    Execute skill
-│                     │       ↓
-│                     │    Append tool_result to messages
-│                     │       ↓
-│                     │    Call LLM again (loop)
-└─────────────────────┘
-```
-
-Key points:
-
-- **The LLM decides when to use a tool.** It sees the tool definitions and chooses based on the user's request. The agent runtime never guesses — it just orchestrates.
-- **The runtime validates before executing.** Even if the LLM requests a tool, the runtime checks: Does this skill exist? Does it have the required capabilities? Are the parameters valid? This is the action plan validation layer from SECURITY.md.
-- **Multiple rounds are possible.** The LLM can chain tools: search the web, then fetch a URL, then summarize. Each tool result feeds back into the next LLM call. A configurable max-rounds limit prevents infinite loops.
-- **Tool results are opaque to the user.** The user sees the final text response. They don't see intermediate tool calls unless the agent chooses to mention them.
-
-#### Changes to the LLM client (anthropic.rs)
-
-The Anthropic Messages API already supports tool use. The current client sends `messages` and gets back `text` content blocks. We need to:
-
-1. Add `tools` to the request (array of tool definitions with `name`, `description`, `input_schema`).
-2. Handle `tool_use` content blocks in the response (with `id`, `name`, `input`).
-3. Add `tool_result` content blocks to the conversation (with `tool_use_id`, `content`).
-4. Support `Message.content` as a structured type (array of content blocks) instead of a plain string, to carry both text and tool interactions.
-
-The `complete()` method becomes `complete_with_tools()` or we evolve the existing method. The runtime loop replaces the current single-shot call.
-
-#### Skill discovery and registration
-
-At startup:
-1. The `SkillRegistry` scans for builtin skills (compiled in) and Wasm skills (loaded from disk in v0.4).
-2. Each skill is instantiated and its `parameters_schema()` is cached.
-3. The runtime calls `registry.tool_definitions()` to get the list to send to the LLM.
+- **`Skill` trait** in `src/skills/mod.rs` — `name()`, `description()`, `parameters_schema()`, `capabilities()`, `execute()`. Each skill provides a JSON Schema for its parameters.
+- **`SkillRegistry`** in `src/skills/registry.rs` — HashMap-based registry with `register()`, `get()`, `tool_definitions()`. Skills are registered at startup based on config.
+- **`ToolDefinition`** — `name`, `description`, `input_schema` — serializes to both Anthropic and Ollama API formats.
+- **Agentic loop** — `agentic_loop()` in `runtime.rs` loops calling the LLM, executes skills on `tool_use`, feeds `tool_result` back. `MAX_TOOL_ROUNDS = 10` safety limit. After the limit, forces a final call without tools.
+- **Anthropic tool use** — `InputContentBlock::ToolUse`/`ToolResult`, `ResponseContentBlock` tagged enum (Text/ToolUse). `StopReason` enum: `EndTurn`, `ToolUse`, `MaxTokens`.
+- **Ollama tool use** — OpenAI-style tool definitions, `role: "tool"` for results, synthesized tool IDs.
+- **Error handling** — Skill errors are sent as `tool_result` content (don't abort the loop); unknown tool names produce error `tool_result`.
+- **Web search skill** — `WebSearchSkill` with multi-provider architecture (`SearchProvider` trait). Tavily and Perplexity providers, configurable via `[skills.web_search]` TOML section.
 
 ```toml
-# config/agent.toml — skill configuration (v0.2)
-[skills]
-enabled = ["web_search", "url_fetch"]
-
+# config/agent.toml — skill configuration
 [skills.web_search]
+provider = "tavily"               # "tavily" or "perplexity"
 api_key = "${TAVILY_API_KEY}"
 max_results = 5
 ```
-
-Skills that are not in the `enabled` list are not exposed to the LLM. This gives the operator explicit control over what the agent can do.
 
 ### Model tiering
 
@@ -954,13 +855,13 @@ skills = []
 
 **Agent definition fields:**
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `model` | No | Model identifier (provider:model). Falls back to tier default. |
-| `persona` | No | Persona package name. Loads identity, personality, instructions from the persona directory. |
-| `instructions` | No | Inline system prompt override. If both `persona` and `instructions` are set, instructions are appended to the persona's prompt. |
-| `skills` | No | Allowlist of skills the agent can use. If omitted, inherits the parent's full skill set. If set to `[]`, the agent has no tool access. |
-| `max_tokens` | No | Per-request token limit. Falls back to `[llm].max_tokens_per_request`. |
+| Field          | Required | Description                                                                                                                            |
+|----------------|----------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `model`        | No       | Model identifier (provider:model). Falls back to tier default.                                                                         |
+| `persona`      | No       | Persona package name. Loads identity, personality, instructions from the persona directory.                                            |
+| `instructions` | No       | Inline system prompt override. If both `persona` and `instructions` are set, instructions are appended to the persona's prompt.        |
+| `skills`       | No       | Allowlist of skills the agent can use. If omitted, inherits the parent's full skill set. If set to `[]`, the agent has no tool access. |
+| `max_tokens`   | No       | Per-request token limit. Falls back to `[llm].max_tokens_per_request`.                                                                 |
 
 Resolution order for model: `[llm.agents.<name>].model` → skill manifest `tier` → `[llm.tiers]` default.
 
@@ -1080,35 +981,31 @@ allow_subagents = true          # Set to false to disable entirely
 
 In v1.0 (federation), sub-agent spawning evolves into agent-to-agent delegation over XMPP. Instead of spawning an in-process session, the orchestrating agent sends a task to another XMPP agent via IQ stanza. The config shape is the same — `[llm.agents.*]` — but the runtime dispatches to a remote JID instead of a local session. This is why sub-agent spawning is designed as a runtime capability from the start: the abstraction must support both local and federated execution.
 
-### Local models via Ollama
+### Local models via Ollama ✓
 
-The `LlmClient` trait abstracts the provider. In v0.2 we ship two implementations:
+Implemented: the `LlmClient` trait abstracts the LLM provider, with two implementations shipping in v0.2.
 
-- **`AnthropicClient`** — existing, talks to the Claude Messages API
-- **`OllamaClient`** — new, talks to the [Ollama REST API](https://github.com/ollama/ollama/blob/main/docs/api.md) (`/api/chat` endpoint)
-
-Ollama serves local models (Llama 3, Mistral, Phi, Gemma, etc.) with an OpenAI-compatible chat API that also supports tool use. This makes it a natural fit for the `light` tier — routine tasks run locally at zero API cost and with no network latency.
+- **`LlmClient` trait** in `src/llm/client.rs` — `complete()` + `description()`, `Send + Sync`, object-safe. `Arc<dyn LlmClient>` enables thread-safe sharing across spawned tasks.
+- **`AnthropicClient`** — talks to the Claude Messages API, supports tool use, multi-modal content (images, documents).
+- **`OllamaClient`** — talks to the [Ollama REST API](https://github.com/ollama/ollama/blob/main/docs/api.md) (`POST /api/chat`). Translates tool definitions to OpenAI-style format, tool results to `role: "tool"` messages, synthesizes tool IDs (`ollama_tool_{index}`). Multi-modal content gracefully degraded with `[Unsupported: ...]` placeholder.
+- **Provider dispatch** in `main.rs` — `match config.llm.provider.as_str()` selects `AnthropicClient` or `OllamaClient`.
+- **No API key required for Ollama** — enables fully private, offline deployments with no cloud dependency.
 
 Configuration:
 
 ```toml
-[llm.tiers]
-heavy = "anthropic:claude-sonnet-4-5-20250929"
-standard = "anthropic:claude-sonnet-4-5-20250929"
-light = "ollama:llama3.1:8b"           # Runs locally, zero cost
-vision = "anthropic:claude-sonnet-4-5-20250929"
+# Anthropic (cloud)
+[llm]
+provider = "anthropic"
+model = "claude-haiku-4-5-20250110"
+api_key = "${ANTHROPIC_API_KEY}"
 
-[llm.ollama]
-host = "http://localhost:11434"        # Default Ollama endpoint
+# Ollama (local)
+[llm]
+provider = "ollama"
+model = "llama3.2"
+host = "http://localhost:11434"   # optional, this is the default
 ```
-
-The provider prefix (`anthropic:`, `ollama:`) in the tier string tells the runtime which `LlmClient` implementation to dispatch to. This keeps config flat and readable.
-
-**Why Ollama in v0.2, not later:**
-- Model tiering without a cheap local option is half the story — the main cost savings come from running `light` tasks locally
-- Ollama's `/api/chat` endpoint supports tool use (function calling), so skills work with local models too
-- The `LlmClient` trait needs to exist for tiering anyway — adding a second implementation at the same time validates the abstraction is correct
-- Privacy-sensitive deployments can run entirely on local models with no external API calls
 
 ---
 
@@ -1277,13 +1174,13 @@ To mitigate risks:
 
 #### Comparison with native skills
 
-| Consideration | Recommendation |
-|---------------|----------------|
-| Security-critical (financial, PII) | Native Wasm |
-| Rapid integration with existing service | MCP bridge |
-| High-frequency calls | Native Wasm (lower overhead) |
-| Community/third-party maintained | MCP bridge |
-| Custom business logic | Native Wasm |
+| Consideration                           | Recommendation               |
+|-----------------------------------------|------------------------------|
+| Security-critical (financial, PII)      | Native Wasm                  |
+| Rapid integration with existing service | MCP bridge                   |
+| High-frequency calls                    | Native Wasm (lower overhead) |
+| Community/third-party maintained        | MCP bridge                   |
+| Custom business logic                   | Native Wasm                  |
 
 ---
 
@@ -1413,11 +1310,8 @@ Ollama (local models) and Anthropic are covered in v0.2. Future providers:
 
 ### File attachments
 
-Support receiving and sending files via XMPP:
-
-- **Receiving attachments** — Users can send images, PDFs, documents to the agent. The agent downloads the file (via HTTP Upload URL in the message, XEP-0363), passes it to the LLM as context (e.g. Claude's vision for images, text extraction for PDFs), and responds accordingly. This enables "analyze this screenshot", "summarize this PDF", "what's in this photo" workflows.
-- **Sending attachments** — The agent can generate and send files back to the user: skill execution results as CSV, generated images, exported data. Uses XEP-0363 (HTTP File Upload) to upload to the server's HTTP upload service, then sends the URL in a message with an `<x xmlns='jabber:x:oob'>` out-of-band reference.
-- **Security** — File downloads must respect size limits, content-type validation, and sandbox restrictions. Files are stored temporarily and cleaned up after processing.
+- **Receiving attachments** ✓ — Implemented in v0.2. Users can send images, PDFs, documents to the agent via OOB URLs (XEP-0066). The agent downloads the file, passes it to the LLM as multi-modal content (image blocks for Claude, gracefully degraded for Ollama), and responds accordingly. OOB fallback body stripping removes redundant URL-only bodies.
+- **Sending attachments** (planned) — The agent can generate and send files back to the user: skill execution results as CSV, generated images, exported data. Uses XEP-0363 (HTTP File Upload) to upload to the server's HTTP upload service, then sends the URL in a message with an `<x xmlns='jabber:x:oob'>` out-of-band reference.
 
 ### Team memory via MUC (Multi-User Chat)
 

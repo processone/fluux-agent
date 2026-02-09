@@ -215,9 +215,9 @@ Messages starting with `/` are intercepted by the runtime and never reach the LL
 
 ## Session Management
 
-Each user has a current conversation session (`history.md`) and optionally archived past sessions. This prevents context from growing unboundedly and lets users start fresh when changing topics.
+Each user has a current conversation session (`history.jsonl`) and optionally archived past sessions stored in JSONL format. This prevents context from growing unboundedly and lets users start fresh when changing topics.
 
-- **`/new`** archives the current session to `sessions/{YYYYMMDD-HHMMSS}.md` and clears the LLM context.
+- **`/new`** archives the current session to `sessions/{YYYYMMDD-HHMMSS}.jsonl` and clears the LLM context.
 - **`/forget`** erases the current history, user profile (`user.md`), and memory (`memory.md`) but preserves archived sessions.
 - **`/status`** shows the number of messages in the current session and how many sessions have been archived.
 
@@ -231,10 +231,10 @@ data/memory/
 ├── {jid}/
 │   ├── user.md                  # What the agent knows about this user
 │   ├── memory.md                # Long-term notes about this user
-│   ├── history.md               # Current session
+│   ├── history.jsonl            # Current session (JSONL)
 │   └── sessions/
-│       ├── 20250601-143022.md   # Archived session
-│       └── 20250602-091500.md   # Another archived session
+│       ├── 20250601-143022.jsonl  # Archived session
+│       └── 20250602-091500.jsonl  # Another archived session
 ```
 
 Global workspace files (`instructions.md`, `identity.md`, `personality.md`) are shared across all users and let admins customize the agent without touching code. When no workspace files exist, a built-in default prompt is used. Per-JID directories are strictly isolated — each user (or room) has their own `user.md`, `memory.md`, and conversation history.

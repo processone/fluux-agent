@@ -131,9 +131,10 @@ impl Skill for WebSearchSkill {
     }
 
     fn description(&self) -> &str {
-        "Search the web for current information. Use this when the user asks about \
-         recent events, facts you're unsure about, or anything that requires up-to-date \
-         information."
+        "Search the web for current information. ONLY use this when the user explicitly \
+         asks a question that requires real-time or recent information (e.g., news, \
+         current prices, live scores, today's weather). Do NOT use for greetings, casual \
+         conversation, general knowledge, or topics you can answer from your training data."
     }
 
     fn parameters_schema(&self) -> Value {
