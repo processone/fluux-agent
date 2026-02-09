@@ -1,10 +1,39 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-use crate::llm::Message;
+use crate::llm::{Message, MessageContent};
+
+/// A single entry in a JSONL session file.
+///
+/// Each line in `history.jsonl` is one of these variants.
+/// The `type` field is used as the JSON tag for deserialization.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum SessionEntry {
+    /// Session header — first line of every session file.
+    #[serde(rename = "session")]
+    Header {
+        version: u32,
+        created: String,
+        jid: String,
+    },
+    /// A conversation message (user or assistant).
+    #[serde(rename = "message")]
+    Message {
+        role: String,
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        msg_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sender: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ts: Option<String>,
+    },
+}
 
 /// Aggregated workspace context for system prompt assembly.
 ///
@@ -19,18 +48,18 @@ pub struct WorkspaceContext {
 }
 
 /// Persistent conversational memory per user.
-/// Stores conversation history and user context as
+/// Stores conversation history as JSONL and user context as
 /// markdown files for transparency and portability.
 ///
 /// Layout:
-///   {base_path}/instructions.md           — global agent behavior rules
-///   {base_path}/identity.md               — global agent identity
-///   {base_path}/personality.md            — global agent personality/tone
-///   {base_path}/{jid}/history.md          — current session conversation log
-///   {base_path}/{jid}/user.md             — what the agent knows about the user
-///   {base_path}/{jid}/memory.md           — long-term notes about the user
-///   {base_path}/{jid}/sessions/           — archived sessions
-///   {base_path}/{jid}/sessions/{ts}.md    — archived session file
+///   {base_path}/instructions.md             — global agent behavior rules
+///   {base_path}/identity.md                 — global agent identity
+///   {base_path}/personality.md              — global agent personality/tone
+///   {base_path}/{jid}/history.jsonl         — current session (JSONL format)
+///   {base_path}/{jid}/user.md               — what the agent knows about the user
+///   {base_path}/{jid}/memory.md             — long-term notes about the user
+///   {base_path}/{jid}/sessions/             — archived sessions
+///   {base_path}/{jid}/sessions/{ts}.jsonl   — archived session file
 pub struct Memory {
     base_path: PathBuf,
 }
@@ -207,21 +236,20 @@ impl Memory {
 
     // ── History (conversation log) ────────────────────────
 
-    /// Appends a message to the user's current session (history.md).
+    /// Appends a message to the user's current session (history.jsonl).
     ///
-    /// For user messages, the JID is included in the header for traceability:
-    ///   `### user (alice@example.com)`
-    /// For assistant messages, no JID is included (agent identity may change):
-    ///   `### assistant`
+    /// Convenience wrapper that uses the JID as the sender label for user messages.
+    /// For assistant messages, sender is omitted.
     pub fn store_message(&self, jid: &str, role: &str, content: &str) -> Result<()> {
-        self.store_message_with_jid(jid, role, content, Some(jid))
+        let sender = if role == "user" { Some(jid) } else { None };
+        self.store_message_structured(jid, role, content, None, sender)
     }
 
-    /// Appends a message with a custom sender label in the header.
+    /// Appends a message with a custom sender label.
     /// Used for MUC rooms where the sender is identified by nick, not JID.
     ///
-    /// `sender_label` is included in user headers: `### user (sender_label)`
-    /// Pass None to omit the label (assistant messages always omit it).
+    /// `sender_label` is stored in the `sender` field of the JSONL entry.
+    /// Pass None to omit the sender (assistant messages always omit it).
     pub fn store_message_with_jid(
         &self,
         jid: &str,
@@ -229,34 +257,66 @@ impl Memory {
         content: &str,
         sender_label: Option<&str>,
     ) -> Result<()> {
-        let path = self.user_dir(jid)?.join("history.md");
+        let sender = if role == "user" { sender_label } else { None };
+        self.store_message_structured(jid, role, content, None, sender)
+    }
+
+    /// Appends a message with full structured metadata to the JSONL session file.
+    ///
+    /// This is the core storage function. All metadata (msg_id, sender, timestamp)
+    /// is stored as structured JSON fields, never embedded in the content text.
+    ///
+    /// On first write, a session header line is prepended automatically.
+    pub fn store_message_structured(
+        &self,
+        jid: &str,
+        role: &str,
+        content: &str,
+        msg_id: Option<&str>,
+        sender: Option<&str>,
+    ) -> Result<()> {
+        let path = self.user_dir(jid)?.join("history.jsonl");
+        let is_new = !path.exists();
+
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)?;
 
-        if role == "user" {
-            if let Some(label) = sender_label {
-                writeln!(file, "### user ({label})\n{content}\n")?;
-            } else {
-                writeln!(file, "### user\n{content}\n")?;
-            }
-        } else {
-            writeln!(file, "### {role}\n{content}\n")?;
+        // Write session header on first entry
+        if is_new {
+            let header = SessionEntry::Header {
+                version: 1,
+                created: chrono::Utc::now().to_rfc3339(),
+                jid: jid.to_string(),
+            };
+            let header_json = serde_json::to_string(&header)?;
+            writeln!(file, "{header_json}")?;
         }
+
+        let entry = SessionEntry::Message {
+            role: role.to_string(),
+            content: content.to_string(),
+            msg_id: msg_id.map(|s| s.to_string()),
+            sender: sender.map(|s| s.to_string()),
+            ts: Some(chrono::Utc::now().to_rfc3339()),
+        };
+        let json = serde_json::to_string(&entry)?;
+        writeln!(file, "{json}")?;
+
         Ok(())
     }
 
     /// Retrieves the last N messages from the current session
     pub fn get_history(&self, jid: &str, limit: usize) -> Result<Vec<Message>> {
-        let path = self.base_path.join(jid).join("history.md");
+        let path = self.base_path.join(jid).join("history.jsonl");
 
         if !path.exists() {
             return Ok(Vec::new());
         }
 
         let content = fs::read_to_string(&path)?;
-        let messages = parse_history(&content);
+        let messages = parse_session(&content);
 
         // Return only the last `limit` messages
         let start = messages.len().saturating_sub(limit);
@@ -265,19 +325,19 @@ impl Memory {
 
     /// Starts a new session for a user.
     ///
-    /// Archives the current history.md into sessions/{timestamp}.md
+    /// Archives the current history.jsonl into sessions/{timestamp}.jsonl
     /// and clears the current history so the LLM starts fresh.
     /// Returns a human-readable summary of what happened.
     pub fn new_session(&self, jid: &str) -> Result<String> {
         let user_dir = self.user_dir(jid)?;
-        let history_path = user_dir.join("history.md");
+        let history_path = user_dir.join("history.jsonl");
 
         if !history_path.exists() {
             return Ok("No active session to archive.".to_string());
         }
 
         let content = fs::read_to_string(&history_path)?;
-        let message_count = parse_history(&content).len();
+        let message_count = parse_session(&content).len();
 
         if message_count == 0 {
             return Ok("Session is already empty.".to_string());
@@ -288,7 +348,7 @@ impl Memory {
         fs::create_dir_all(&sessions_dir)?;
 
         let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let archive_path = sessions_dir.join(format!("{timestamp}.md"));
+        let archive_path = sessions_dir.join(format!("{timestamp}.jsonl"));
         fs::rename(&history_path, &archive_path)?;
 
         info!(
@@ -312,13 +372,21 @@ impl Memory {
 
         let mut erased = Vec::new();
 
-        // Erase history
-        let history_path = user_dir.join("history.md");
-        if history_path.exists() {
-            let content = fs::read_to_string(&history_path)?;
-            let count = parse_history(&content).len();
-            fs::remove_file(&history_path)?;
+        // Erase history (JSONL and legacy markdown)
+        let history_jsonl = user_dir.join("history.jsonl");
+        let history_md = user_dir.join("history.md");
+        if history_jsonl.exists() {
+            let content = fs::read_to_string(&history_jsonl)?;
+            let count = parse_session(&content).len();
+            fs::remove_file(&history_jsonl)?;
             erased.push(format!("{count} messages"));
+        }
+        if history_md.exists() {
+            // Legacy cleanup — remove old markdown history if present
+            fs::remove_file(&history_md)?;
+            if erased.is_empty() {
+                erased.push("legacy history".to_string());
+            }
         }
 
         // Erase user profile (user.md and legacy context.md)
@@ -390,14 +458,14 @@ impl Memory {
 
     /// Total number of messages in the current session for a JID
     pub fn message_count(&self, jid: &str) -> Result<usize> {
-        let path = self.base_path.join(jid).join("history.md");
+        let path = self.base_path.join(jid).join("history.jsonl");
 
         if !path.exists() {
             return Ok(0);
         }
 
         let content = fs::read_to_string(&path)?;
-        Ok(parse_history(&content).len())
+        Ok(parse_session(&content).len())
     }
 
     /// Number of archived sessions for a JID
@@ -413,7 +481,7 @@ impl Memory {
             .filter(|e| {
                 e.path()
                     .extension()
-                    .map(|ext| ext == "md")
+                    .map(|ext| ext == "jsonl" || ext == "md")
                     .unwrap_or(false)
             })
             .count();
@@ -422,179 +490,98 @@ impl Memory {
     }
 }
 
-/// Parses a history.md file into a list of messages.
+
+// ── JSONL session parsing ─────────────────────────────
+
+/// Builds a `Message` for the LLM from a session entry.
 ///
-/// Supports both old and new header formats:
-///   `### user`                    — old format (no JID)
-///   `### user (alice@example.com)` — new format (with JID)
-///   `### assistant`               — assistant (no JID in either format)
+/// Only conversational context is passed to the model — runtime metadata
+/// (msg_id, timestamps) is never included. The model just produces content;
+/// the runtime manages all metadata (following OpenClaw's approach).
 ///
-/// The returned `Message.role` is always the bare role ("user" or "assistant"),
-/// with the JID suffix stripped.
-fn parse_history(content: &str) -> Vec<Message> {
+/// When `sender` is present (MUC rooms with multiple participants), it is
+/// prepended as a natural text prefix so the model knows who is speaking:
+///
+///     "alice@muc: Hello everyone!"
+///
+/// In 1:1 chats, `sender` should be `None` (only one user, no ambiguity).
+pub(crate) fn build_message_for_llm(
+    role: String,
+    content: String,
+    sender: Option<&str>,
+) -> Message {
+    let text = if let Some(s) = sender {
+        format!("{s}: {content}")
+    } else {
+        content
+    };
+    Message {
+        role,
+        content: MessageContent::Text(text),
+    }
+}
+
+/// Parses a JSONL session file into a list of messages for the LLM API.
+///
+/// Each line is a `SessionEntry`. Message entries are converted to plain text
+/// `Message` structs. Runtime metadata (msg_id, timestamps) is stripped — only
+/// MUC sender labels (`@muc` suffix) are preserved as text prefixes.
+///
+/// Header entries are skipped. Invalid lines are silently ignored.
+fn parse_session(content: &str) -> Vec<Message> {
     let mut messages = Vec::new();
-    let mut current_role: Option<String> = None;
-    let mut current_content = String::new();
 
     for line in content.lines() {
-        if let Some(role_raw) = line.strip_prefix("### ") {
-            // Flush previous message
-            if let Some(r) = current_role.take() {
-                let text = current_content.trim().to_string();
-                if !text.is_empty() {
-                    messages.push(Message {
-                        role: r,
-                        content: text.into(),
-                    });
-                }
-            }
-            // Extract bare role, stripping optional " (jid)" suffix
-            let role = extract_bare_role(role_raw.trim());
-            current_role = Some(role);
-            current_content.clear();
-        } else if current_role.is_some() {
-            current_content.push_str(line);
-            current_content.push('\n');
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
         }
-    }
 
-    // Flush last message
-    if let Some(r) = current_role {
-        let text = current_content.trim().to_string();
-        if !text.is_empty() {
-            messages.push(Message {
-                role: r,
-                content: text.into(),
-            });
+        let entry: SessionEntry = match serde_json::from_str(line) {
+            Ok(e) => e,
+            Err(_) => continue, // skip malformed lines
+        };
+
+        match entry {
+            SessionEntry::Header { .. } => {} // skip header
+            SessionEntry::Message {
+                role,
+                content,
+                sender,
+                ..
+            } => {
+                if content.is_empty() {
+                    continue;
+                }
+                // Only pass MUC sender labels to the LLM (for participant attribution).
+                // 1:1 senders are redundant — only one user in the conversation.
+                // MUC senders are identified by the "@muc" suffix convention.
+                let muc_sender = sender
+                    .as_deref()
+                    .filter(|s| s.ends_with("@muc"));
+                messages.push(build_message_for_llm(
+                    role,
+                    content,
+                    muc_sender,
+                ));
+            }
         }
     }
 
     messages
 }
 
-/// Extracts the bare role from a header like "user (alice@example.com)" → "user"
-/// or "assistant" → "assistant".
-fn extract_bare_role(role_raw: &str) -> String {
-    if let Some(paren_pos) = role_raw.find(" (") {
-        role_raw[..paren_pos].to_string()
-    } else {
-        role_raw.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── parse_history tests ───────────────────────────────
-
-    #[test]
-    fn test_parse_history_basic() {
-        let content = "\
-### user
-Hello!
-
-### assistant
-Hi there! How can I help?
-
-### user
-What's the weather?
-
-### assistant
-I can't check yet, but that feature is coming soon!
-";
-        let messages = parse_history(content);
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[0].content, "Hello!");
-        assert_eq!(messages[1].role, "assistant");
-        assert_eq!(messages[1].content, "Hi there! How can I help?");
-        assert_eq!(messages[2].role, "user");
-        assert_eq!(messages[2].content, "What's the weather?");
-        assert_eq!(messages[3].role, "assistant");
-        assert_eq!(
-            messages[3].content,
-            "I can't check yet, but that feature is coming soon!"
-        );
-    }
-
-    #[test]
-    fn test_parse_history_multiline_content() {
-        let content = "\
-### user
-Can you help me with:
-1. First thing
-2. Second thing
-
-### assistant
-Sure! Let me address both:
-
-1. For the first thing, do X.
-2. For the second, do Y.
-";
-        let messages = parse_history(content);
-        assert_eq!(messages.len(), 2);
-        assert!(messages[0].content.contains("1. First thing"));
-        assert!(messages[1].content.contains("1. For the first thing"));
-    }
-
-    #[test]
-    fn test_parse_history_empty() {
-        let messages = parse_history("");
-        assert!(messages.is_empty());
-    }
-
-    #[test]
-    fn test_parse_history_with_jid_format() {
-        let content = "\
-### user (alice@example.com)
-Hello!
-
-### assistant
-Hi there!
-
-### user (alice@example.com)
-How are you?
-";
-        let messages = parse_history(content);
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[0].content, "Hello!");
-        assert_eq!(messages[1].role, "assistant");
-        assert_eq!(messages[1].content, "Hi there!");
-        assert_eq!(messages[2].role, "user");
-        assert_eq!(messages[2].content, "How are you?");
-    }
-
-    #[test]
-    fn test_parse_history_mixed_old_and_new_format() {
-        let content = "\
-### user
-Old message without JID
-
-### assistant
-Response
-
-### user (alice@example.com)
-New message with JID
-";
-        let messages = parse_history(content);
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[0].content, "Old message without JID");
-        assert_eq!(messages[2].role, "user");
-        assert_eq!(messages[2].content, "New message with JID");
-    }
-
-    #[test]
-    fn test_extract_bare_role() {
-        assert_eq!(extract_bare_role("user"), "user");
-        assert_eq!(extract_bare_role("assistant"), "assistant");
-        assert_eq!(extract_bare_role("user (alice@example.com)"), "user");
-        assert_eq!(
-            extract_bare_role("user (room@conference.example.com)"),
-            "user"
-        );
+    /// Test helper: extracts the text content from a message.
+    /// All messages are now plain `MessageContent::Text`.
+    fn text(content: &MessageContent) -> &str {
+        match content {
+            MessageContent::Text(s) => s.as_str(),
+            MessageContent::Blocks(_) => panic!("Expected Text, got Blocks"),
+        }
     }
 
     // ── store / retrieve tests ────────────────────────────
@@ -614,13 +601,14 @@ New message with JID
         let history = memory.get_history("user@test", 10).unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].role, "user");
-        assert_eq!(history[0].content, "Hello!");
+        // 1:1 sender is not prefixed (not MUC)
+        assert_eq!(text(&history[0].content), "Hello!");
         assert_eq!(history[1].role, "assistant");
-        assert_eq!(history[1].content, "Hi there!");
+        assert_eq!(text(&history[1].content), "Hi there!");
     }
 
     #[test]
-    fn test_store_message_includes_jid_in_header() {
+    fn test_store_message_jsonl_format() {
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::open(dir.path()).unwrap();
 
@@ -631,13 +619,26 @@ New message with JID
             .store_message("alice@example.com", "assistant", "Hi!")
             .unwrap();
 
-        // Read raw file to verify format
-        let raw = fs::read_to_string(dir.path().join("alice@example.com/history.md")).unwrap();
-        assert!(raw.contains("### user (alice@example.com)"));
-        assert!(raw.contains("### assistant"));
-        assert!(!raw.contains("### assistant ("));
+        // Read raw JSONL file to verify format
+        let raw = fs::read_to_string(dir.path().join("alice@example.com/history.jsonl")).unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 3); // header + 2 messages
 
-        // Parsed history should strip the JID
+        // First line is session header
+        assert!(lines[0].contains("\"type\":\"session\""));
+        assert!(lines[0].contains("\"version\":1"));
+        assert!(lines[0].contains("alice@example.com"));
+
+        // Second line is user message with sender
+        assert!(lines[1].contains("\"role\":\"user\""));
+        assert!(lines[1].contains("\"sender\":\"alice@example.com\""));
+        assert!(lines[1].contains("\"content\":\"Hello!\""));
+
+        // Third line is assistant message (no sender)
+        assert!(lines[2].contains("\"role\":\"assistant\""));
+        assert!(!lines[2].contains("\"sender\""));
+
+        // Parsed history returns correct messages
         let history = memory.get_history("alice@example.com", 10).unwrap();
         assert_eq!(history[0].role, "user");
         assert_eq!(history[1].role, "assistant");
@@ -656,8 +657,9 @@ New message with JID
 
         let history = memory.get_history("user@test", 3).unwrap();
         assert_eq!(history.len(), 3);
-        assert_eq!(history[0].content, "Message 7");
-        assert_eq!(history[2].content, "Message 9");
+        // 1:1 sender not prefixed
+        assert_eq!(text(&history[0].content), "Message 7");
+        assert_eq!(text(&history[2].content), "Message 9");
     }
 
     // ── User profile / context tests ──────────────────────
@@ -889,7 +891,7 @@ New message with JID
             .unwrap();
         let history = memory.get_history("user@test", 10).unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].content, "Fresh start!");
+        assert_eq!(text(&history[0].content), "Fresh start!");
     }
 
     #[test]
@@ -1038,11 +1040,11 @@ New message with JID
         // Each JID sees only their own data
         let alice_history = memory.get_history("alice@test", 10).unwrap();
         assert_eq!(alice_history.len(), 1);
-        assert_eq!(alice_history[0].content, "Alice's message");
+        assert_eq!(text(&alice_history[0].content), "Alice's message");
 
         let bob_history = memory.get_history("bob@test", 10).unwrap();
         assert_eq!(bob_history.len(), 1);
-        assert_eq!(bob_history[0].content, "Bob's message");
+        assert_eq!(text(&bob_history[0].content), "Bob's message");
 
         assert_eq!(
             memory.get_user_profile("alice@test").unwrap().unwrap(),
@@ -1069,18 +1071,18 @@ New message with JID
             .store_message(room_jid, "assistant", "Hi Alice!")
             .unwrap();
 
-        // Verify raw format
-        let raw = fs::read_to_string(dir.path().join(room_jid).join("history.md")).unwrap();
-        assert!(raw.contains("### user (alice@muc)"));
-        assert!(raw.contains("### assistant"));
+        // Verify raw JSONL format
+        let raw = fs::read_to_string(dir.path().join(room_jid).join("history.jsonl")).unwrap();
+        assert!(raw.contains("\"sender\":\"alice@muc\""));
+        assert!(raw.contains("\"role\":\"assistant\""));
 
-        // Verify parsed history strips labels
+        // Verify parsed history includes MUC sender prefix
         let history = memory.get_history(room_jid, 10).unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].role, "user");
-        assert_eq!(history[0].content, "Hello everyone!");
+        assert_eq!(text(&history[0].content), "alice@muc: Hello everyone!");
         assert_eq!(history[1].role, "assistant");
-        assert_eq!(history[1].content, "Hi Alice!");
+        assert_eq!(text(&history[1].content), "Hi Alice!");
     }
 
     #[test]
@@ -1092,9 +1094,13 @@ New message with JID
             .store_message_with_jid("test@localhost", "user", "No label", None)
             .unwrap();
 
-        let raw = fs::read_to_string(dir.path().join("test@localhost/history.md")).unwrap();
-        assert!(raw.contains("### user\n"));
-        assert!(!raw.contains("### user ("));
+        let raw = fs::read_to_string(dir.path().join("test@localhost/history.jsonl")).unwrap();
+        // User message with None sender should not have sender field
+        assert!(!raw.contains("\"sender\""));
+
+        // Parsed history should return plain Text content (no meta block)
+        let history = memory.get_history("test@localhost", 10).unwrap();
+        assert_eq!(text(&history[0].content), "No label");
     }
 
     #[test]
@@ -1294,6 +1300,7 @@ New message with JID
 
         let room_jid = "devroom@conference.example.com";
 
+        // store_message uses jid as sender for user messages
         memory
             .store_message(room_jid, "user", "Hello room!")
             .unwrap();
@@ -1306,7 +1313,9 @@ New message with JID
 
         let history = memory.get_history(room_jid, 10).unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].content, "Hello room!");
+        // store_message uses room JID as sender, but it's not a MUC nick
+        // (no @muc suffix), so no prefix is added for the LLM
+        assert_eq!(text(&history[0].content), "Hello room!");
 
         assert_eq!(
             memory.get_user_profile(room_jid).unwrap().unwrap(),
@@ -1315,6 +1324,380 @@ New message with JID
         assert_eq!(
             memory.get_user_memory(room_jid).unwrap().unwrap(),
             "Active project: Fluux Agent"
+        );
+    }
+
+    // ── JSONL session parsing tests ───────────────────────
+
+    #[test]
+    fn test_parse_session_basic() {
+        let content = r#"{"type":"session","version":1,"created":"2025-02-08T19:00:00Z","jid":"alice@example.com"}
+{"type":"message","role":"user","content":"Hello!","sender":"alice@example.com","ts":"2025-02-08T19:00:01Z"}
+{"type":"message","role":"assistant","content":"Hi there!","ts":"2025-02-08T19:00:02Z"}"#;
+
+        let messages = parse_session(content);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        // 1:1 sender not prefixed (not @muc)
+        assert_eq!(text(&messages[0].content), "Hello!");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(text(&messages[1].content), "Hi there!");
+    }
+
+    #[test]
+    fn test_parse_session_with_msg_id() {
+        let content = r#"{"type":"session","version":1,"created":"2025-02-08T19:00:00Z","jid":"alice@example.com"}
+{"type":"message","role":"user","content":"Hello!","msg_id":"abc-123","sender":"alice@example.com"}
+{"type":"message","role":"assistant","content":"Hi there!","msg_id":"def-456"}"#;
+
+        let messages = parse_session(content);
+        assert_eq!(messages.len(), 2);
+        // msg_id is runtime metadata — not visible to LLM
+        // 1:1 sender not prefixed
+        assert_eq!(text(&messages[0].content), "Hello!");
+        assert_eq!(text(&messages[1].content), "Hi there!");
+    }
+
+    #[test]
+    fn test_parse_session_reaction() {
+        let content = r#"{"type":"message","role":"user","content":"Hello!","msg_id":"abc-123","sender":"alice@example.com"}
+{"type":"message","role":"assistant","content":"Hi there!","msg_id":"def-456"}
+{"type":"message","role":"user","content":"[Reacted to msg_id: def-456 with 👍]","sender":"alice@example.com"}"#;
+
+        let messages = parse_session(content);
+        assert_eq!(messages.len(), 3);
+        // Reaction text contains the target msg_id naturally
+        assert_eq!(
+            text(&messages[2].content),
+            "[Reacted to msg_id: def-456 with 👍]"
+        );
+    }
+
+    #[test]
+    fn test_parse_session_muc_multiple_senders() {
+        let content = r#"{"type":"session","version":1,"created":"2025-02-08T19:00:00Z","jid":"room@conference.localhost"}
+{"type":"message","role":"user","content":"Anyone around?","sender":"alice@muc"}
+{"type":"message","role":"user","content":"I'm here","sender":"bob@muc"}
+{"type":"message","role":"assistant","content":"Hi everyone!"}"#;
+
+        let messages = parse_session(content);
+        assert_eq!(messages.len(), 3);
+        // MUC senders get text prefix for participant attribution
+        assert_eq!(text(&messages[0].content), "alice@muc: Anyone around?");
+        assert_eq!(text(&messages[1].content), "bob@muc: I'm here");
+        assert_eq!(text(&messages[2].content), "Hi everyone!");
+    }
+
+    #[test]
+    fn test_parse_session_empty_content_skipped() {
+        let content = r#"{"type":"message","role":"user","content":"Hello!"}
+{"type":"message","role":"user","content":""}
+{"type":"message","role":"assistant","content":"Hi!"}"#;
+
+        let messages = parse_session(content);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(text(&messages[0].content), "Hello!");
+        assert_eq!(text(&messages[1].content), "Hi!");
+    }
+
+    #[test]
+    fn test_parse_session_empty_input() {
+        let messages = parse_session("");
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_parse_session_malformed_lines_ignored() {
+        let content = r#"{"type":"message","role":"user","content":"Hello!"}
+not valid json
+{"type":"message","role":"assistant","content":"Hi!"}"#;
+
+        let messages = parse_session(content);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_session_no_optional_fields() {
+        let content =
+            r#"{"type":"message","role":"user","content":"Hello!"}"#;
+
+        let messages = parse_session(content);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(text(&messages[0].content), "Hello!");
+    }
+
+    #[test]
+    fn test_session_entry_serialization_roundtrip() {
+        let entry = SessionEntry::Message {
+            role: "user".to_string(),
+            content: "Hello!".to_string(),
+            msg_id: Some("abc-123".to_string()),
+            sender: Some("alice@example.com".to_string()),
+            ts: Some("2025-02-08T19:00:00Z".to_string()),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: SessionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, parsed);
+    }
+
+    #[test]
+    fn test_session_entry_optional_fields_omitted() {
+        let entry = SessionEntry::Message {
+            role: "assistant".to_string(),
+            content: "Hi!".to_string(),
+            msg_id: None,
+            sender: None,
+            ts: None,
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("msg_id"));
+        assert!(!json.contains("sender"));
+        assert!(!json.contains("ts"));
+    }
+
+    #[test]
+    fn test_session_header_serialization() {
+        let entry = SessionEntry::Header {
+            version: 1,
+            created: "2025-02-08T19:00:00Z".to_string(),
+            jid: "alice@example.com".to_string(),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"type\":\"session\""));
+        assert!(json.contains("\"version\":1"));
+
+        let parsed: SessionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, parsed);
+    }
+
+    // ── store_message_structured integration tests ────────
+
+    #[test]
+    fn test_store_message_structured_with_msg_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        memory
+            .store_message_structured(
+                "user@test",
+                "user",
+                "Hello!",
+                Some("abc-123"),
+                Some("user@test"),
+            )
+            .unwrap();
+        memory
+            .store_message_structured(
+                "user@test",
+                "assistant",
+                "Hi there!",
+                Some("def-456"),
+                None,
+            )
+            .unwrap();
+
+        let history = memory.get_history("user@test", 10).unwrap();
+        assert_eq!(history.len(), 2);
+        // msg_id not visible to LLM; 1:1 sender not prefixed
+        assert_eq!(text(&history[0].content), "Hello!");
+        assert_eq!(text(&history[1].content), "Hi there!");
+    }
+
+    #[test]
+    fn test_store_message_structured_creates_session_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        memory
+            .store_message_structured("alice@test", "user", "Hi", None, Some("alice@test"))
+            .unwrap();
+
+        // Verify JSONL file has session header
+        let raw = fs::read_to_string(dir.path().join("alice@test/history.jsonl")).unwrap();
+        let first_line = raw.lines().next().unwrap();
+        let header: SessionEntry = serde_json::from_str(first_line).unwrap();
+        match header {
+            SessionEntry::Header { version, jid, .. } => {
+                assert_eq!(version, 1);
+                assert_eq!(jid, "alice@test");
+            }
+            _ => panic!("Expected session header as first line"),
+        }
+    }
+
+    #[test]
+    fn test_store_message_structured_no_duplicate_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        // Store two messages — header should appear only once
+        memory
+            .store_message_structured("user@test", "user", "One", None, None)
+            .unwrap();
+        memory
+            .store_message_structured("user@test", "user", "Two", None, None)
+            .unwrap();
+
+        let raw = fs::read_to_string(dir.path().join("user@test/history.jsonl")).unwrap();
+        let header_count = raw
+            .lines()
+            .filter(|l| l.contains("\"type\":\"session\""))
+            .count();
+        assert_eq!(header_count, 1);
+    }
+
+    #[test]
+    fn test_store_message_structured_reaction_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        // Store original message with msg_id
+        memory
+            .store_message_structured(
+                "user@test",
+                "user",
+                "Hello!",
+                Some("msg-001"),
+                Some("alice@test"),
+            )
+            .unwrap();
+
+        // Store reaction (reaction text in content, no msg_id on the reaction itself)
+        memory
+            .store_message_structured(
+                "user@test",
+                "user",
+                "[Reacted to msg_id: msg-001 with 👍]",
+                None,
+                Some("alice@test"),
+            )
+            .unwrap();
+
+        let history = memory.get_history("user@test", 10).unwrap();
+        assert_eq!(history.len(), 2);
+        // msg_id and 1:1 sender not visible to LLM
+        assert_eq!(text(&history[0].content), "Hello!");
+        // Reaction text contains the target msg_id naturally
+        assert_eq!(
+            text(&history[1].content),
+            "[Reacted to msg_id: msg-001 with 👍]"
+        );
+    }
+
+    // ── build_message_for_llm unit tests ─────────────────
+
+    #[test]
+    fn test_build_message_for_llm_no_sender() {
+        let msg = build_message_for_llm("user".to_string(), "Hello!".to_string(), None);
+        assert_eq!(msg.role, "user");
+        assert_eq!(text(&msg.content), "Hello!");
+    }
+
+    #[test]
+    fn test_build_message_for_llm_with_muc_sender() {
+        let msg = build_message_for_llm(
+            "user".to_string(),
+            "Hello!".to_string(),
+            Some("alice@muc"),
+        );
+        assert_eq!(msg.role, "user");
+        assert_eq!(text(&msg.content), "alice@muc: Hello!");
+    }
+
+    #[test]
+    fn test_build_message_for_llm_assistant_no_sender() {
+        let msg = build_message_for_llm("assistant".to_string(), "Hi there!".to_string(), None);
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(text(&msg.content), "Hi there!");
+    }
+
+    #[test]
+    fn test_build_message_for_llm_empty_content_with_sender() {
+        let msg = build_message_for_llm("user".to_string(), "".to_string(), Some("nick@muc"));
+        assert_eq!(text(&msg.content), "nick@muc: ");
+    }
+
+    #[test]
+    fn test_build_message_for_llm_content_with_colon() {
+        // Content that itself contains "sender: " pattern should not be confused
+        let msg = build_message_for_llm(
+            "user".to_string(),
+            "alice@muc: says hello".to_string(),
+            Some("bob@muc"),
+        );
+        assert_eq!(text(&msg.content), "bob@muc: alice@muc: says hello");
+    }
+
+    // ── parse_session sender filtering tests ─────────────
+
+    #[test]
+    fn test_parse_session_muc_sender_prefixed() {
+        let content = r#"{"type":"message","role":"user","content":"Hey","sender":"nick@muc"}"#;
+        let messages = parse_session(content);
+        assert_eq!(text(&messages[0].content), "nick@muc: Hey");
+    }
+
+    #[test]
+    fn test_parse_session_non_muc_sender_not_prefixed() {
+        let content =
+            r#"{"type":"message","role":"user","content":"Hey","sender":"alice@example.com"}"#;
+        let messages = parse_session(content);
+        assert_eq!(text(&messages[0].content), "Hey");
+    }
+
+    #[test]
+    fn test_parse_session_sender_containing_muc_but_not_ending() {
+        // "alice@muc.server" should NOT be treated as a MUC sender
+        let content =
+            r#"{"type":"message","role":"user","content":"Hey","sender":"alice@muc.server"}"#;
+        let messages = parse_session(content);
+        assert_eq!(text(&messages[0].content), "Hey");
+    }
+
+    #[test]
+    fn test_parse_session_no_sender_field() {
+        let content = r#"{"type":"message","role":"user","content":"Hey"}"#;
+        let messages = parse_session(content);
+        assert_eq!(text(&messages[0].content), "Hey");
+    }
+
+    #[test]
+    fn test_parse_session_assistant_with_msg_id_no_prefix() {
+        // Assistant messages never get sender prefix
+        let content = r#"{"type":"message","role":"assistant","content":"Reply","msg_id":"out-001"}"#;
+        let messages = parse_session(content);
+        assert_eq!(text(&messages[0].content), "Reply");
+    }
+
+    #[test]
+    fn test_parse_session_whitespace_lines_skipped() {
+        let content = "  \n\t\n{\"type\":\"message\",\"role\":\"user\",\"content\":\"Hey\"}\n  \n";
+        let messages = parse_session(content);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(text(&messages[0].content), "Hey");
+    }
+
+    #[test]
+    fn test_parse_session_mixed_muc_and_non_muc() {
+        // Realistic MUC session: participants have @muc, assistant does not
+        let content = r#"{"type":"session","version":1,"created":"2025-02-08T19:00:00Z","jid":"room@conference.localhost"}
+{"type":"message","role":"user","content":"Question?","sender":"alice@muc"}
+{"type":"message","role":"assistant","content":"Answer!","msg_id":"out-001"}
+{"type":"message","role":"user","content":"Thanks","sender":"bob@muc"}
+{"type":"message","role":"user","content":"[Reacted to msg_id: out-001 with 👍]","sender":"alice@muc"}"#;
+
+        let messages = parse_session(content);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(text(&messages[0].content), "alice@muc: Question?");
+        assert_eq!(text(&messages[1].content), "Answer!");
+        assert_eq!(text(&messages[2].content), "bob@muc: Thanks");
+        assert_eq!(
+            text(&messages[3].content),
+            "alice@muc: [Reacted to msg_id: out-001 with 👍]"
         );
     }
 }

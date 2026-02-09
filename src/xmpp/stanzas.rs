@@ -31,6 +31,18 @@ pub struct IncomingMessage {
     pub oob: Vec<OobData>,
 }
 
+/// Parsed incoming reaction (XEP-0444)
+#[derive(Debug, Clone)]
+pub struct IncomingReaction {
+    pub from: String,
+    pub to: String,
+    /// The id of the message being reacted to
+    pub message_id: String,
+    /// Emoji reactions (one or more)
+    pub emojis: Vec<String>,
+    pub message_type: MessageType,
+}
+
 // ── XML escaping helpers ─────────────────────────────────
 
 /// Escape a value for use inside an XML attribute delimited by single quotes.
@@ -66,6 +78,11 @@ pub fn build_message(from: Option<&str>, to: &str, body: &str, id: Option<&str>)
 /// Sent when the agent starts generating a response (LLM call begins).
 /// `from` is Some for component mode, None for C2S.
 /// `msg_type` is `"chat"` for 1:1 or `"groupchat"` for MUC.
+///
+/// Includes XEP-0334 message processing hints (`<no-store/>`, `<no-permanent-store/>`)
+/// to signal that this is a transient notification that should not be archived.
+/// This is especially important for MUC, where some servers drop bodyless messages
+/// that lack processing hints.
 pub fn build_chat_state_composing(from: Option<&str>, to: &str, msg_type: &str) -> String {
     let from_attr = from
         .map(|f| format!(" from='{}'", escape_attr(f)))
@@ -75,6 +92,8 @@ pub fn build_chat_state_composing(from: Option<&str>, to: &str, msg_type: &str) 
     format!(
         "<message{from_attr} to='{to}' type='{msg_type}'>\
          <composing xmlns='http://jabber.org/protocol/chatstates'/>\
+         <no-store xmlns='urn:xmpp:hints'/>\
+         <no-permanent-store xmlns='urn:xmpp:hints'/>\
          </message>"
     )
 }
@@ -84,6 +103,8 @@ pub fn build_chat_state_composing(from: Option<&str>, to: &str, msg_type: &str) 
 /// (e.g., error during LLM call, or cancelled request).
 /// `from` is Some for component mode, None for C2S.
 /// `msg_type` is `"chat"` for 1:1 or `"groupchat"` for MUC.
+///
+/// Includes XEP-0334 message processing hints (see `build_chat_state_composing`).
 pub fn build_chat_state_paused(from: Option<&str>, to: &str, msg_type: &str) -> String {
     let from_attr = from
         .map(|f| format!(" from='{}'", escape_attr(f)))
@@ -93,6 +114,8 @@ pub fn build_chat_state_paused(from: Option<&str>, to: &str, msg_type: &str) -> 
     format!(
         "<message{from_attr} to='{to}' type='{msg_type}'>\
          <paused xmlns='http://jabber.org/protocol/chatstates'/>\
+         <no-store xmlns='urn:xmpp:hints'/>\
+         <no-permanent-store xmlns='urn:xmpp:hints'/>\
          </message>"
     )
 }
@@ -300,14 +323,17 @@ pub fn build_muc_join(room_jid: &str, nick: &str, from: Option<&str>) -> String 
 /// Builds a groupchat message for a MUC room (XEP-0045).
 /// `from` is Some for component mode, None for C2S.
 /// Includes `<active/>` chat state (XEP-0085) to clear the typing indicator.
-pub fn build_muc_message(from: Option<&str>, to: &str, body: &str) -> String {
+pub fn build_muc_message(from: Option<&str>, to: &str, body: &str, id: Option<&str>) -> String {
     let from_attr = from
         .map(|f| format!(" from='{}'", escape_attr(f)))
+        .unwrap_or_default();
+    let id_attr = id
+        .map(|i| format!(" id='{}'", escape_attr(i)))
         .unwrap_or_default();
     let to = escape_attr(to);
     let body = escape(body);
     format!(
-        "<message{from_attr} to='{to}' type='groupchat'>\
+        "<message{from_attr} to='{to}'{id_attr} type='groupchat'>\
          <body>{body}</body>\
          <active xmlns='http://jabber.org/protocol/chatstates'/>\
          </message>"
@@ -364,6 +390,7 @@ use quick_xml::events::Event;
 pub enum XmppStanza {
     Message(IncomingMessage),
     Presence(IncomingPresence),
+    Reaction(IncomingReaction),
     StreamError(String),
     /// IQ, SM ack/req, or any other stanza we don't process
     Ignored,
@@ -376,6 +403,7 @@ pub enum XmppStanza {
 struct ChildElement {
     name: String,
     namespace: Option<String>,
+    attrs: Vec<(String, String)>,
     text: String,
     children: Vec<ChildElement>,
 }
@@ -422,6 +450,13 @@ impl StanzaBuilder {
 }
 
 impl ChildElement {
+    fn get_attr(&self, name: &str) -> Option<&str> {
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
     fn find_child(&self, name: &str) -> Option<&ChildElement> {
         self.children.iter().find(|c| c.name == name)
     }
@@ -494,6 +529,7 @@ impl StanzaParser {
                     let child = ChildElement {
                         name,
                         namespace: extract_xmlns_from_event(e),
+                        attrs: extract_attrs_from_event(e),
                         ..Default::default()
                     };
                     self.builder.child_stack.push(child);
@@ -516,6 +552,7 @@ impl StanzaParser {
                     let child = ChildElement {
                         name,
                         namespace: extract_xmlns_from_event(e),
+                        attrs: extract_attrs_from_event(e),
                         ..Default::default()
                     };
                     // Add to parent or to top-level children
@@ -643,6 +680,29 @@ fn finalize_message(builder: &StanzaBuilder) -> XmppStanza {
         Some("groupchat") => MessageType::GroupChat,
         _ => MessageType::Chat,
     };
+
+    // Check for reactions (XEP-0444)
+    let reaction_elements = builder.find_children_ns("reactions", "urn:xmpp:reactions:0");
+    if let Some(reactions_el) = reaction_elements.first() {
+        if let Some(target_id) = reactions_el.get_attr("id") {
+            let emojis: Vec<String> = reactions_el
+                .children
+                .iter()
+                .filter(|c| c.name == "reaction")
+                .map(|c| c.text.clone())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if !emojis.is_empty() {
+                return XmppStanza::Reaction(IncomingReaction {
+                    from,
+                    to,
+                    message_id: target_id.to_string(),
+                    emojis,
+                    message_type,
+                });
+            }
+        }
+    }
 
     // Check for chat state notification (XEP-0085): composing/paused/active/inactive/gone
     let chat_state_names = ["composing", "paused", "active", "inactive", "gone"];
@@ -883,7 +943,7 @@ mod tests {
 
     #[test]
     fn test_build_muc_message_escapes_body() {
-        let xml = build_muc_message(None, "room@conf.local", "2 > 1 & 1 < 2");
+        let xml = build_muc_message(None, "room@conf.local", "2 > 1 & 1 < 2", None);
         assert!(xml.contains("<body>2 &gt; 1 &amp; 1 &lt; 2</body>"));
     }
 
@@ -973,6 +1033,8 @@ mod tests {
         assert!(xml.contains("to='lobby@conference.localhost'"));
         assert!(xml.contains("type='groupchat'"));
         assert!(xml.contains("<composing xmlns='http://jabber.org/protocol/chatstates'/>"));
+        assert!(xml.contains("<no-store xmlns='urn:xmpp:hints'/>"));
+        assert!(xml.contains("<no-permanent-store xmlns='urn:xmpp:hints'/>"));
     }
 
     #[test]
@@ -998,6 +1060,24 @@ mod tests {
         assert!(xml.contains("to='lobby@conference.localhost'"));
         assert!(xml.contains("type='groupchat'"));
         assert!(xml.contains("<paused xmlns='http://jabber.org/protocol/chatstates'/>"));
+        assert!(xml.contains("<no-store xmlns='urn:xmpp:hints'/>"));
+        assert!(xml.contains("<no-permanent-store xmlns='urn:xmpp:hints'/>"));
+    }
+
+    #[test]
+    fn test_chat_state_hints_present_on_all_types() {
+        // XEP-0334 hints should be present on all chat state notifications,
+        // not just groupchat — they prevent MAM archival of transient notifications
+        let composing_chat = build_chat_state_composing(None, "user@localhost", "chat");
+        assert!(composing_chat.contains("<no-store xmlns='urn:xmpp:hints'/>"));
+
+        let paused_chat = build_chat_state_paused(None, "user@localhost", "chat");
+        assert!(paused_chat.contains("<no-store xmlns='urn:xmpp:hints'/>"));
+
+        let composing_muc =
+            build_chat_state_composing(Some("agent.localhost"), "room@conf", "groupchat");
+        assert!(composing_muc.contains("<no-store xmlns='urn:xmpp:hints'/>"));
+        assert!(composing_muc.contains("<no-permanent-store xmlns='urn:xmpp:hints'/>"));
     }
 
     // ── Presence tests ──────────────────────────────────
@@ -1197,7 +1277,7 @@ mod tests {
 
     #[test]
     fn test_build_muc_message_c2s() {
-        let xml = build_muc_message(None, "lobby@conference.localhost", "Hello room!");
+        let xml = build_muc_message(None, "lobby@conference.localhost", "Hello room!", None);
         assert!(!xml.contains("from="));
         assert!(xml.contains("to='lobby@conference.localhost'"));
         assert!(xml.contains("type='groupchat'"));
@@ -1207,7 +1287,7 @@ mod tests {
 
     #[test]
     fn test_build_muc_message_component() {
-        let xml = build_muc_message(Some("agent.localhost"), "lobby@conference.localhost", "Hi!");
+        let xml = build_muc_message(Some("agent.localhost"), "lobby@conference.localhost", "Hi!", None);
         assert!(xml.contains("from='agent.localhost'"));
         assert!(xml.contains("type='groupchat'"));
         assert!(xml.contains("<body>Hi!</body>"));
@@ -1611,6 +1691,106 @@ mod tests {
                 assert_eq!(p.presence_type, PresenceType::Available);
             }
             other => panic!("Expected Presence, got {other:?}"),
+        }
+    }
+
+    // ── XEP-0444 reaction tests ──────────────────────────
+
+    #[test]
+    fn test_sp_reaction_single_emoji() {
+        let xml = "<message from='alice@example.com' to='bot@example.com' type='chat'>\
+                     <reactions id='msg-123' xmlns='urn:xmpp:reactions:0'>\
+                       <reaction>👍</reaction>\
+                     </reactions>\
+                   </message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Reaction(r) => {
+                assert_eq!(r.from, "alice@example.com");
+                assert_eq!(r.to, "bot@example.com");
+                assert_eq!(r.message_id, "msg-123");
+                assert_eq!(r.emojis, vec!["👍"]);
+                assert_eq!(r.message_type, MessageType::Chat);
+            }
+            other => panic!("Expected Reaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_reaction_multiple_emojis() {
+        let xml = "<message from='alice@example.com' to='bot@example.com' type='chat'>\
+                     <reactions id='msg-456' xmlns='urn:xmpp:reactions:0'>\
+                       <reaction>👍</reaction>\
+                       <reaction>❤️</reaction>\
+                       <reaction>🎉</reaction>\
+                     </reactions>\
+                   </message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Reaction(r) => {
+                assert_eq!(r.message_id, "msg-456");
+                assert_eq!(r.emojis, vec!["👍", "❤️", "🎉"]);
+            }
+            other => panic!("Expected Reaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_reaction_groupchat() {
+        let xml = "<message from='room@conference.example.com/alice' to='bot@example.com' type='groupchat'>\
+                     <reactions id='muc-msg-1' xmlns='urn:xmpp:reactions:0'>\
+                       <reaction>👍</reaction>\
+                     </reactions>\
+                   </message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Reaction(r) => {
+                assert_eq!(r.from, "room@conference.example.com/alice");
+                assert_eq!(r.message_id, "muc-msg-1");
+                assert_eq!(r.message_type, MessageType::GroupChat);
+            }
+            other => panic!("Expected Reaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_reaction_without_id_ignored() {
+        // Reactions element without id attribute — no target message, ignore
+        let xml = "<message from='alice@example.com' to='bot@example.com' type='chat'>\
+                     <reactions xmlns='urn:xmpp:reactions:0'>\
+                       <reaction>👍</reaction>\
+                     </reactions>\
+                   </message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Ignored => {}
+            other => panic!("Expected Ignored (no id on reactions), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_reaction_empty_emojis_ignored() {
+        // Reactions element with id but no <reaction> children
+        let xml = "<message from='alice@example.com' to='bot@example.com' type='chat'>\
+                     <reactions id='msg-789' xmlns='urn:xmpp:reactions:0'>\
+                     </reactions>\
+                   </message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Ignored => {}
+            other => panic!("Expected Ignored (no emojis), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sp_reaction_wrong_namespace_treated_as_message() {
+        // Wrong namespace — should not be parsed as reaction
+        let xml = "<message from='alice@example.com' to='bot@example.com' type='chat'>\
+                     <body>Hello</body>\
+                     <reactions id='msg-123' xmlns='wrong:namespace'>\
+                       <reaction>👍</reaction>\
+                     </reactions>\
+                   </message>";
+        match parse_xml_to_stanza(xml).unwrap() {
+            XmppStanza::Message(msg) => {
+                assert_eq!(msg.body, "Hello");
+            }
+            other => panic!("Expected Message (wrong namespace), got {other:?}"),
         }
     }
 }

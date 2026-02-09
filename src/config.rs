@@ -98,7 +98,7 @@ fn default_max_tokens() -> u32 {
 }
 
 fn default_memory_backend() -> String {
-    "markdown".to_string()
+    "jsonl".to_string()
 }
 
 fn default_memory_path() -> PathBuf {

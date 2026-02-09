@@ -142,6 +142,8 @@ The agent can do things beyond conversation.
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
 - [ ] Cost estimation and per-JID quota (token tracking, usage limits, `/usage` command)
 - [ ] Persona packages (bundled identity/personality/instructions, `/persona` commands)
+- [ ] LLM prompt caching (`cache_control` markers for system prompt and history prefix)
+- [ ] Context window management (token-budget history, compaction, memory flush)
 
 ### Persona packages
 
@@ -333,6 +335,135 @@ allow_user_personas = true         # Enable user-created personas
 max_user_personas = 5              # Limit per user
 allow_sharing = true               # Allow export/import
 ```
+
+### Session file structure migration
+
+Currently, conversation history is stored as flat markdown files (`history.md`) with inline metadata tags (`[msg_id: ...]`, `[Reacted to msg_id: ...]`). This works well for text-only conversations with lightweight annotations.
+
+When tool use is introduced (agentic loop with `tool_use` → `tool_result` chains), markdown may no longer be sufficient:
+- Tool calls and results have structured parameters that don't map cleanly to markdown
+- Multi-modal content blocks (images, documents) need typed representation
+- The LLM context replay needs exact structure preservation (role, content type, tool_use_id)
+
+**Migration plan:** When tool use is implemented, migrate session storage from markdown to JSONL (one JSON object per message). The `parse_history()` and `store_message()` functions are the only read/write points — changing the format requires updating only these two functions. Archived sessions (`sessions/*.md`) can remain as markdown; only the active `history.md` needs to change.
+
+### LLM prompt caching
+
+The Anthropic Messages API is stateless — every request must include the full conversation history. For multi-turn conversations, this means replaying the system prompt and all prior messages on every turn, which is expensive in both cost and latency.
+
+Anthropic's **prompt caching** (`cache_control` breakpoints) lets the API reuse cached KV computations when the prefix of the messages array matches a previous request. The replayed portion is processed at reduced cost (~10% of base input price on cache hits) and significantly lower latency.
+
+**Implementation plan:**
+- Add `cache_control: { type: "ephemeral" }` breakpoints to the system prompt and at the boundary between history and the new user message
+- The system prompt (persona + workspace context) changes rarely and benefits most from caching
+- History messages form a growing prefix — each new turn extends the cached prefix by one exchange
+- Track cache hit/miss rates via the `cache_creation_input_tokens` and `cache_read_input_tokens` fields in the API response
+- Expose cache stats alongside token usage in `/status` or logging
+
+This pairs well with increasing `MAX_HISTORY` beyond the current 20 messages, since caching makes longer histories affordable.
+
+### Context window management
+
+Currently, the agent uses a simple `MAX_HISTORY = 20` message limit: only the last 20 messages are replayed to the LLM on each turn. Older messages are silently dropped from the LLM's view (though they remain in `history.md` on disk). This is cheap and simple, but has serious drawbacks:
+
+- **MUC rooms exhaust the window quickly** — with 5 participants, 20 messages covers only ~4 exchanges
+- **Fixed message count ignores message size** — 20 short messages use far fewer tokens than 20 long messages with attachments
+- **No graceful degradation** — when messages fall off the window, the context is lost abruptly with no summary
+
+**Planned improvements**, inspired by OpenClaw's multi-layered approach:
+
+#### 1. Token-budget-based history (replace message count limit)
+
+Replace `MAX_HISTORY = 20` with a configurable token budget. Instead of counting messages, estimate tokens and include as many messages as fit within the budget. This adapts naturally to message length and model context size.
+
+```toml
+[llm]
+history_token_budget = 50000   # max tokens allocated to conversation history
+# Remaining context budget goes to: system prompt + workspace + new message + response
+```
+
+Token estimation can use a simple heuristic (4 chars ≈ 1 token) or the `tiktoken` crate for precision. The budget should be model-aware — a 200K context model can afford more history than an 8K model.
+
+Separate defaults for 1:1 and MUC:
+
+```toml
+[llm]
+dm_history_token_budget = 50000     # 1:1 conversations
+muc_history_token_budget = 80000    # MUC rooms (more participants, need more context)
+```
+
+#### 2. Compaction (summarization of older history)
+
+When the conversation exceeds the token budget, instead of dropping old messages silently, summarize them into a compact preamble. This preserves important context (decisions made, facts stated, user preferences) while freeing token space for recent messages.
+
+**How it works:**
+- When a new message would push the total beyond the budget, trigger compaction
+- Take the oldest N messages that need to be evicted and send them to a cheap/fast model (e.g. Haiku) with the prompt: "Summarize this conversation segment concisely, preserving key facts, decisions, and user preferences"
+- Replace those N messages with a single `[system]` or `[summary]` block containing the summary
+- Recent messages after the compaction point are preserved verbatim
+- The summary is written to disk (in the session file) so it persists across restarts
+
+**Compaction result format** in history:
+
+```
+### system
+[compacted: 45 messages summarized]
+Alice asked about deploying Fluux Agent. Bob suggested using Docker.
+The team decided on a Kubernetes deployment with Helm charts.
+Key decisions: PostgreSQL for persistence, Redis for caching.
+
+### user (alice@muc)
+[msg_id: abc-789]
+OK, I'll draft the Helm chart today.
+
+### assistant
+[msg_id: def-012]
+Great! Let me know if you need help with the values.yaml structure.
+```
+
+#### 3. Memory flush (persistent context extraction)
+
+Before compaction runs, optionally trigger a "memory flush" — an LLM call that extracts important long-term facts from the about-to-be-compacted messages and writes them to `context.md` (or `memory.md`). This ensures that critical information survives compaction:
+
+- User preferences and facts ("Alice prefers Python", "Bob's timezone is CET")
+- Decisions and agreements ("Team decided to use gRPC for inter-service communication")
+- Project context ("Current sprint focuses on authentication refactor")
+
+This is essentially the "proactive context learning" item already in the v0.2 checklist, but triggered automatically by compaction rather than only manually.
+
+#### 4. MUC-specific tuning
+
+MUC rooms have unique context management needs:
+
+- **Higher default token budget** — multiple participants generate more messages
+- **Participant-aware compaction** — when summarizing, preserve who said what (the `[from:]` tags are critical here)
+- **Selective attention** — if the bot is only mentioned occasionally, most room messages are background context. Compaction could prioritize preserving messages that mention the bot or contain decisions
+
+#### 5. Configurable per-user/per-room overrides
+
+```toml
+# Global defaults
+[llm]
+dm_history_token_budget = 50000
+muc_history_token_budget = 80000
+
+# Per-room override
+[[rooms]]
+jid = "dev@conference.example.com"
+history_token_budget = 120000    # busy room, needs more context
+
+# Per-user override (future)
+# [users."alice@example.com"]
+# history_token_budget = 100000
+```
+
+#### Implementation priority
+
+1. **Token-budget history** — replace `MAX_HISTORY = 20`, biggest immediate impact
+2. **Prompt caching** — reduce cost of longer histories (see section above)
+3. **Compaction** — graceful degradation for long conversations
+4. **Memory flush** — long-term fact extraction tied to compaction
+5. **Per-room/per-user overrides** — fine-tuning for specific use cases
 
 ### How skills are exposed to the LLM
 
@@ -937,15 +1068,17 @@ Structured machine-readable communication.
 - [ ] `urn:fluux:agent:0#skills` — skill discovery via IQ
 - [ ] `urn:fluux:agent:0#execute` — skill execution via IQ
 - [ ] `urn:fluux:agent:0#confirm` — destructive action confirmation
-- [ ] Reactions support — agent sends and receives message reactions (XEP-0444)
+- [x] Inbound reactions — agent receives and stores emoji reactions (XEP-0444)
+- [ ] Outbound reactions — agent sends reactions to user messages (XEP-0444)
 - [ ] Message corrections — agent can correct its previous response (XEP-0308)
 
 ### Reactions (XEP-0444)
 
 Reactions serve as lightweight feedback and acknowledgment:
 
-- **Agent sends reactions** — The agent can react to user messages (e.g. thumbs-up to acknowledge a command, checkmark when a task completes). This is an action the LLM can trigger.
-- **Agent receives reactions** — Users can react to agent messages. The agent interprets these as feedback signals (e.g. thumbs-down on a response could trigger a retry or context adjustment).
+- **Agent receives reactions** ✓ — Users can react to agent messages with emoji. The parser extracts `<reactions xmlns='urn:xmpp:reactions:0'>` stanzas, correlates them to the target message via the `id` attribute, and stores them in conversation history as `[Reacted to msg_id: {id} with {emojis}]`. The LLM sees reactions in context and can reason about user feedback.
+- **Message ID tracking** ✓ — All messages (inbound and outbound) are tagged with `[msg_id: {id}]` in conversation history. Outbound messages get UUID v4 stanza IDs. This enables the LLM to correlate reactions with specific messages.
+- **Agent sends reactions** (planned) — The agent can react to user messages (e.g. thumbs-up to acknowledge a command, checkmark when a task completes). This will be an action the LLM can trigger via tool use.
 - Reactions use XEP-0444 (Message Reactions), which references the original message by `id`.
 
 ---

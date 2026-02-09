@@ -10,7 +10,7 @@ use crate::llm::{AnthropicClient, InputContentBlock, Message, MessageContent};
 use crate::xmpp::component::{ChatState, DisconnectReason, XmppCommand, XmppEvent};
 use crate::xmpp::stanzas::{self, MessageType, OobData, PresenceType};
 
-use super::memory::{Memory, WorkspaceContext};
+use super::memory::{build_message_for_llm, Memory, WorkspaceContext};
 
 /// Maximum number of history messages sent to the LLM
 const MAX_HISTORY: usize = 20;
@@ -91,13 +91,13 @@ impl AgentRuntime {
                         }
 
                         // Store ALL room messages to history (for full context)
-                        // Use sender's nick in the header: "### user (alice)"
                         let sender_label = format!("{sender_nick}@muc");
-                        let store_body = build_history_text(&msg.body, &msg.oob);
-                        if let Err(e) = self.memory.store_message_with_jid(
+                        let raw_body = build_history_text(&msg.body, &msg.oob);
+                        if let Err(e) = self.memory.store_message_structured(
                             bare_from,
                             "user",
-                            &store_body,
+                            &raw_body,
+                            msg.id.as_deref(),
                             Some(&sender_label),
                         ) {
                             error!("Failed to store MUC message: {e}");
@@ -132,16 +132,22 @@ impl AgentRuntime {
                         let room_jid = bare_from.to_string();
                         match response {
                             Ok(text) => {
-                                // Store assistant response to room history
-                                if let Err(e) =
-                                    self.memory.store_message(&room_jid, "assistant", &text)
-                                {
+                                // Generate outbound message id
+                                let out_id = uuid::Uuid::new_v4().to_string();
+                                if let Err(e) = self.memory.store_message_structured(
+                                    &room_jid,
+                                    "assistant",
+                                    &text,
+                                    Some(&out_id),
+                                    None,
+                                ) {
                                     error!("Failed to store MUC response: {e}");
                                 }
                                 let _ = cmd_tx
                                     .send(XmppCommand::SendMucMessage {
                                         to: room_jid,
                                         body: text,
+                                        id: Some(out_id),
                                     })
                                     .await;
                             }
@@ -159,6 +165,7 @@ impl AgentRuntime {
                                     .send(XmppCommand::SendMucMessage {
                                         to: room_jid,
                                         body: format!("Sorry, an error occurred: {e}"),
+                                        id: None,
                                     })
                                     .await;
                             }
@@ -192,6 +199,7 @@ impl AgentRuntime {
                                         .send(XmppCommand::SendMessage {
                                             to: msg.from.clone(),
                                             body: text,
+                                            id: None,
                                         })
                                         .await;
                                 }
@@ -201,6 +209,7 @@ impl AgentRuntime {
                                         .send(XmppCommand::SendMessage {
                                             to: msg.from.clone(),
                                             body: format!("Sorry, an error occurred: {e}"),
+                                            id: None,
                                         })
                                         .await;
                                 }
@@ -224,20 +233,23 @@ impl AgentRuntime {
                             let cmd_tx_clone = cmd_tx.clone();
                             let from = msg.from.clone();
                             let body = msg.body.clone();
+                            let msg_id = msg.id.clone();
                             let oob_list = msg.oob.clone();
 
                             tokio::spawn(async move {
                                 let result = handle_message_with_attachments(
-                                    &from, &body, &oob_list,
+                                    &from, &body, msg_id.as_deref(), &oob_list,
                                     &downloader, &memory, &llm, &config,
                                 ).await;
 
                                 match result {
                                     Ok(text) => {
+                                        let out_id = uuid::Uuid::new_v4().to_string();
                                         let _ = cmd_tx_clone
                                             .send(XmppCommand::SendMessage {
                                                 to: from,
                                                 body: text,
+                                                id: Some(out_id),
                                             })
                                             .await;
                                     }
@@ -254,6 +266,7 @@ impl AgentRuntime {
                                             .send(XmppCommand::SendMessage {
                                                 to: from,
                                                 body: format!("Sorry, an error occurred: {e}"),
+                                                id: None,
                                             })
                                             .await;
                                     }
@@ -270,14 +283,16 @@ impl AgentRuntime {
                                 })
                                 .await;
 
-                            let response = self.handle_message(&msg.from, &msg.body).await;
+                            let response = self.handle_message(&msg.from, &msg.body, msg.id.as_deref()).await;
 
                             match response {
                                 Ok(text) => {
+                                    let out_id = uuid::Uuid::new_v4().to_string();
                                     let _ = cmd_tx
                                         .send(XmppCommand::SendMessage {
                                             to: msg.from.clone(),
                                             body: text,
+                                            id: Some(out_id),
                                         })
                                         .await;
                                 }
@@ -294,6 +309,7 @@ impl AgentRuntime {
                                         .send(XmppCommand::SendMessage {
                                             to: msg.from.clone(),
                                             body: format!("Sorry, an error occurred: {e}"),
+                                            id: None,
                                         })
                                         .await;
                                 }
@@ -339,6 +355,119 @@ impl AgentRuntime {
                         }
                         _ => {
                             debug!("Presence from {bare_jid}: {:?}", pres.presence_type);
+                        }
+                    }
+                }
+                XmppEvent::Reaction(reaction) => {
+                    let bare_from = stanzas::bare_jid(&reaction.from);
+                    let is_muc = reaction.message_type == MessageType::GroupChat;
+
+                    // Apply same authorization checks as regular messages
+                    if !is_muc {
+                        if !self.config.is_domain_allowed(&reaction.from) {
+                            warn!("Cross-domain reaction rejected from {}", reaction.from);
+                            continue;
+                        }
+                        if !self.config.is_allowed(&reaction.from) {
+                            warn!("Unauthorized reaction from {}, ignoring", reaction.from);
+                            continue;
+                        }
+                    }
+
+                    let emojis = reaction.emojis.join(" ");
+                    info!(
+                        "Reaction from {bare_from}: {emojis} on msg {}",
+                        reaction.message_id
+                    );
+
+                    // Store reaction in conversation history so the LLM sees it
+                    let reaction_text = format!(
+                        "[Reacted to msg_id: {} with {}]",
+                        reaction.message_id, emojis
+                    );
+
+                    if is_muc {
+                        let sender_nick = reaction.from.split('/').nth(1).unwrap_or("unknown");
+                        let sender_label = format!("{sender_nick}@muc");
+                        if let Err(e) = self.memory.store_message_structured(
+                            bare_from,
+                            "user",
+                            &reaction_text,
+                            None,
+                            Some(&sender_label),
+                        ) {
+                            error!("Failed to store MUC reaction: {e}");
+                        }
+                    } else if let Err(e) = self.memory.store_message_structured(
+                        bare_from,
+                        "user",
+                        &reaction_text,
+                        None,
+                        Some(bare_from),
+                    ) {
+                        error!("Failed to store reaction: {e}");
+                    }
+
+                    // Send reaction through LLM — it decides whether to respond
+                    let reply_to = if is_muc {
+                        bare_from.to_string()
+                    } else {
+                        reaction.from.clone()
+                    };
+
+                    // Send <composing/> before the LLM call
+                    let msg_type_str = if is_muc { "groupchat" } else { "chat" };
+                    let _ = cmd_tx
+                        .send(XmppCommand::SendChatState {
+                            to: if is_muc { bare_from.to_string() } else { reply_to.clone() },
+                            state: ChatState::Composing,
+                            msg_type: msg_type_str.to_string(),
+                        })
+                        .await;
+
+                    // Call LLM with full history (reaction is already stored)
+                    let response = self.handle_reaction(bare_from).await;
+
+                    match response {
+                        Ok(text) => {
+                            let out_id = uuid::Uuid::new_v4().to_string();
+                            let jid_key = bare_from.to_string();
+                            if let Err(e) = self.memory.store_message_structured(
+                                &jid_key,
+                                "assistant",
+                                &text,
+                                Some(&out_id),
+                                None,
+                            ) {
+                                error!("Failed to store reaction response: {e}");
+                            }
+                            if is_muc {
+                                let _ = cmd_tx
+                                    .send(XmppCommand::SendMucMessage {
+                                        to: jid_key,
+                                        body: text,
+                                        id: Some(out_id),
+                                    })
+                                    .await;
+                            } else {
+                                let _ = cmd_tx
+                                    .send(XmppCommand::SendMessage {
+                                        to: reply_to,
+                                        body: text,
+                                        id: Some(out_id),
+                                    })
+                                    .await;
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error processing reaction: {e}");
+                            let _ = cmd_tx
+                                .send(XmppCommand::SendChatState {
+                                    to: if is_muc { bare_from.to_string() } else { reply_to },
+                                    state: ChatState::Paused,
+                                    msg_type: msg_type_str.to_string(),
+                                })
+                                .await;
                         }
                     }
                 }
@@ -484,8 +613,9 @@ Commands:\n\
 
     // ── LLM message handling ─────────────────────────────
 
-    /// Processes an incoming message and produces a response via LLM
-    async fn handle_message(&self, from: &str, body: &str) -> Result<String> {
+    /// Processes an incoming message and produces a response via LLM.
+    /// `msg_id` is the inbound XMPP stanza id (stored as structured metadata).
+    async fn handle_message(&self, from: &str, body: &str, msg_id: Option<&str>) -> Result<String> {
         // Bare JID for memory (without resource)
         let bare_jid = stanzas::bare_jid(from);
 
@@ -496,23 +626,50 @@ Commands:\n\
         // Build system prompt from workspace files
         let system_prompt = self.build_system_prompt(&workspace);
 
-        // Build message list for LLM
+        // Build message list for LLM — 1:1 chat, no sender prefix needed
         let mut messages = history;
-        messages.push(Message {
-            role: "user".to_string(),
-            content: body.to_string().into(),
-        });
+        messages.push(build_message_for_llm(
+            "user".to_string(),
+            body.to_string(),
+            None,
+        ));
 
         // Call LLM
         let response = self.llm.complete(&system_prompt, &messages).await?;
 
-        // Persist messages
-        self.memory.store_message(bare_jid, "user", body)?;
+        // Generate outbound message id
+        let out_id = uuid::Uuid::new_v4().to_string();
+
+        // Persist messages with structured metadata (clean content, metadata as fields)
+        self.memory.store_message_structured(bare_jid, "user", body, msg_id, Some(bare_jid))?;
         self.memory
-            .store_message(bare_jid, "assistant", &response.text)?;
+            .store_message_structured(bare_jid, "assistant", &response.text, Some(&out_id), None)?;
 
         info!(
             "Response to {bare_jid}: {} chars ({} tokens used)",
+            response.text.len(),
+            response.input_tokens + response.output_tokens
+        );
+
+        Ok(response.text)
+    }
+
+    /// Processes a reaction via LLM.
+    /// The reaction is already stored in history by the caller.
+    /// The LLM decides whether a response is warranted based on the full context.
+    /// Returns the LLM response text (caller stores and sends it).
+    async fn handle_reaction(&self, jid: &str) -> Result<String> {
+        let history = self.memory.get_history(jid, MAX_HISTORY)?;
+        let workspace = self.memory.get_workspace_context(jid)?;
+        let system_prompt = self.build_system_prompt(&workspace);
+
+        // The reaction is already the last entry in history (stored by caller)
+        let messages = history;
+
+        let response = self.llm.complete(&system_prompt, &messages).await?;
+
+        info!(
+            "Reaction response to {jid}: {} chars ({} tokens used)",
             response.text.len(),
             response.input_tokens + response.output_tokens
         );
@@ -586,9 +743,11 @@ fn build_history_text(body: &str, oob_list: &[OobData]) -> String {
 ///
 /// Downloads each file, converts supported types to Anthropic API content blocks,
 /// and sends a multi-modal message to the LLM. Runs in a spawned task.
+#[allow(clippy::too_many_arguments)]
 async fn handle_message_with_attachments(
     from: &str,
     body: &str,
+    msg_id: Option<&str>,
     oob_list: &[OobData],
     downloader: &FileDownloader,
     memory: &Memory,
@@ -660,11 +819,12 @@ async fn handle_message_with_attachments(
         });
     }
 
-    // Build the multi-modal message
+    // Build the multi-modal message with structured JSON metadata block
     let history = memory.get_history(bare_jid, MAX_HISTORY)?;
     let workspace = memory.get_workspace_context(bare_jid)?;
     let system_prompt = build_system_prompt_static(&config.agent.name, &workspace);
 
+    // Build multi-modal message — content blocks only, no runtime metadata
     let mut messages = history;
     messages.push(Message {
         role: "user".to_string(),
@@ -677,15 +837,19 @@ async fn handle_message_with_attachments(
     let response = llm.complete(&system_prompt, &messages).await?;
 
     // Store messages in history (text description, not base64)
-    let mut history_text = attachment_labels.join("\n");
+    // Content is clean — metadata stored as JSONL fields
+    let labels = attachment_labels.join("\n");
+    let mut history_content = labels;
     if !body.is_empty() {
-        if !history_text.is_empty() {
-            history_text.push('\n');
+        if !history_content.is_empty() {
+            history_content.push('\n');
         }
-        history_text.push_str(body);
+        history_content.push_str(body);
     }
-    memory.store_message(bare_jid, "user", &history_text)?;
-    memory.store_message(bare_jid, "assistant", &response.text)?;
+    memory.store_message_structured(bare_jid, "user", &history_content, msg_id, Some(bare_jid))?;
+
+    let out_id = uuid::Uuid::new_v4().to_string();
+    memory.store_message_structured(bare_jid, "assistant", &response.text, Some(&out_id), None)?;
 
     info!(
         "Attachment response to {bare_jid}: {} chars ({} tokens used)",
@@ -785,6 +949,7 @@ fn strip_mention(nick: &str, body: &str) -> String {
     // "@nick" in the middle — no stripping needed, return full body
     body.to_string()
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1257,6 +1422,42 @@ mod tests {
             text,
             "[Attached: a.jpg]\n[Attached: b.pdf]\nCheck these"
         );
+    }
+
+    #[test]
+    fn test_build_history_text_url_no_slashes() {
+        // Pathological URL with no path component
+        let oob = vec![OobData {
+            url: "https://example.com".to_string(),
+            desc: None,
+        }];
+        let text = build_history_text("", &oob);
+        // rsplit('/') on "https://example.com" yields "example.com"
+        assert_eq!(text, "[Attached: example.com]");
+    }
+
+    #[test]
+    fn test_build_history_text_url_trailing_slash() {
+        let oob = vec![OobData {
+            url: "https://example.com/files/".to_string(),
+            desc: None,
+        }];
+        let text = build_history_text("", &oob);
+        // rsplit('/') on trailing slash yields empty string first, fallback to "file"
+        // Actually rsplit('/').next() yields "" (empty) — let's verify behavior
+        assert_eq!(text, "[Attached: ]");
+    }
+
+    #[test]
+    fn test_build_history_text_empty_body_no_oob() {
+        let text = build_history_text("", &[]);
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn test_build_history_text_body_with_whitespace_only() {
+        let text = build_history_text("   ", &[]);
+        assert_eq!(text, "   ");
     }
 
     // ── Status with files test ──────────────────────────

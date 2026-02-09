@@ -313,6 +313,17 @@ impl XmppClient {
                                         .send(XmppEvent::Presence(pres))
                                         .await;
                                 }
+                                XmppStanza::Reaction(reaction) => {
+                                    debug!(
+                                        "Received reaction from {}: {} on msg {}",
+                                        reaction.from,
+                                        reaction.emojis.join(""),
+                                        reaction.message_id
+                                    );
+                                    let _ = event_tx_clone
+                                        .send(XmppEvent::Reaction(reaction))
+                                        .await;
+                                }
                                 XmppStanza::StreamError(condition) => {
                                     error!("Stream error received: {condition}");
                                     let _ = event_tx_clone
@@ -341,8 +352,8 @@ impl XmppClient {
             let mut writer = writer;
             while let Some(cmd) = cmd_rx.recv().await {
                 let xml = match cmd {
-                    XmppCommand::SendMessage { to, body } => {
-                        stanzas::build_message(None, &to, &body, None)
+                    XmppCommand::SendMessage { to, body, id } => {
+                        stanzas::build_message(None, &to, &body, id.as_deref())
                     }
                     XmppCommand::SendChatState {
                         to,
@@ -356,8 +367,8 @@ impl XmppClient {
                             stanzas::build_chat_state_paused(None, &to, &msg_type)
                         }
                     },
-                    XmppCommand::SendMucMessage { to, body } => {
-                        stanzas::build_muc_message(None, &to, &body)
+                    XmppCommand::SendMucMessage { to, body, id } => {
+                        stanzas::build_muc_message(None, &to, &body, id.as_deref())
                     }
                     XmppCommand::JoinMuc { room, nick } => {
                         stanzas::build_muc_join(&room, &nick, None)

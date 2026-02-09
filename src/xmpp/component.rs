@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use quick_xml::events::Event;
 
-use super::stanzas::{self, IncomingMessage, IncomingPresence, StanzaParser, XmppStanza};
+use super::stanzas::{self, IncomingMessage, IncomingPresence, IncomingReaction, StanzaParser, XmppStanza};
 use super::XmppError;
 use crate::config::{ConnectionMode, ServerConfig};
 
@@ -17,6 +17,7 @@ pub enum XmppEvent {
     Connected,
     Message(IncomingMessage),
     Presence(IncomingPresence),
+    Reaction(IncomingReaction),
     /// A `<stream:error>` was received (e.g. `conflict`, `system-shutdown`).
     StreamError(String),
     Error(String),
@@ -25,7 +26,11 @@ pub enum XmppEvent {
 /// Commands sent by the runtime to the XMPP layer
 #[derive(Debug)]
 pub enum XmppCommand {
-    SendMessage { to: String, body: String },
+    SendMessage {
+        to: String,
+        body: String,
+        id: Option<String>,
+    },
     /// Send a chat state notification (XEP-0085) — composing, paused, etc.
     /// `msg_type` is `"chat"` for 1:1 or `"groupchat"` for MUC.
     SendChatState {
@@ -34,7 +39,11 @@ pub enum XmppCommand {
         msg_type: String,
     },
     /// Send a groupchat message to a MUC room (XEP-0045)
-    SendMucMessage { to: String, body: String },
+    SendMucMessage {
+        to: String,
+        body: String,
+        id: Option<String>,
+    },
     /// Join a MUC room (XEP-0045)
     JoinMuc { room: String, nick: String },
     SendRaw(String),
@@ -232,6 +241,17 @@ impl XmppComponent {
                                         .send(XmppEvent::Presence(pres))
                                         .await;
                                 }
+                                XmppStanza::Reaction(reaction) => {
+                                    debug!(
+                                        "Received reaction from {}: {} on msg {}",
+                                        reaction.from,
+                                        reaction.emojis.join(""),
+                                        reaction.message_id
+                                    );
+                                    let _ = event_tx_clone
+                                        .send(XmppEvent::Reaction(reaction))
+                                        .await;
+                                }
                                 XmppStanza::StreamError(condition) => {
                                     error!("Stream error received: {condition}");
                                     let _ = event_tx_clone
@@ -260,8 +280,8 @@ impl XmppComponent {
             let mut writer = writer;
             while let Some(cmd) = cmd_rx.recv().await {
                 let xml = match cmd {
-                    XmppCommand::SendMessage { to, body } => {
-                        stanzas::build_message(Some(&domain), &to, &body, None)
+                    XmppCommand::SendMessage { to, body, id } => {
+                        stanzas::build_message(Some(&domain), &to, &body, id.as_deref())
                     }
                     XmppCommand::SendChatState {
                         to,
@@ -275,8 +295,8 @@ impl XmppComponent {
                             stanzas::build_chat_state_paused(Some(&domain), &to, &msg_type)
                         }
                     },
-                    XmppCommand::SendMucMessage { to, body } => {
-                        stanzas::build_muc_message(Some(&domain), &to, &body)
+                    XmppCommand::SendMucMessage { to, body, id } => {
+                        stanzas::build_muc_message(Some(&domain), &to, &body, id.as_deref())
                     }
                     XmppCommand::JoinMuc { room, nick } => {
                         stanzas::build_muc_join(&room, &nick, Some(&domain))

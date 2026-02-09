@@ -106,6 +106,21 @@ File attachment support via out-of-band URLs.
 
 ---
 
+### XEP-0444: Message Reactions (inbound) ✓
+
+Receive and process emoji reactions to messages.
+
+**Inbound parsing:** The agent detects `<reactions xmlns='urn:xmpp:reactions:0'>` elements inside `<message>` stanzas. The `id` attribute on `<reactions>` identifies the target message, and each `<reaction>` child provides an emoji. Both 1:1 chat and MUC groupchat reactions are supported.
+
+**Message ID tracking:** Message IDs are stored as structured JSONL metadata but not passed to the LLM (runtime-only metadata). Outbound agent messages use UUID v4 stanza IDs. When a reaction arrives, it is stored as `[Reacted to msg_id: {id} with {emojis}]` in the content field, so the LLM sees the reaction text and can correlate it with context.
+
+**References:**
+- `src/xmpp/stanzas.rs:36` — `IncomingReaction` struct
+- `src/xmpp/stanzas.rs:674` — reaction parsing in `finalize_message`
+- `src/agent/runtime.rs:386` — reaction storage in conversation history
+
+---
+
 ## Multi-User Chat
 
 ### XEP-0045: Multi-User Chat (MUC) ✓
@@ -179,9 +194,9 @@ Send and receive file attachments (images, PDFs, documents, generated files).
 
 ---
 
-### XEP-0444: Message Reactions
+### XEP-0444: Message Reactions (outbound)
 
-Send and receive emoji reactions to messages.
+Send emoji reactions to messages.
 
 **Status:** Roadmap (future)
 
@@ -200,7 +215,7 @@ See `docs/DEVELOPING.md` for rationale.
 ## Version History
 
 - **v0.1** — XEP-0114 (component mode), XEP-0085 (chat states), XEP-0045 (MUC), XEP-0066 (OOB file attachments)
-- **v0.2** — (current development)
+- **v0.2** — XEP-0444 inbound reactions, message ID embedding, C2S client mode (RFC 4616 PLAIN, RFC 5802 SCRAM-SHA-1, STARTTLS), JSONL session format
 
 ---
 

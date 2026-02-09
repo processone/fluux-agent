@@ -13,13 +13,14 @@ data/memory/
 ├── alice@example.com/           # Per-user directory (bare JID)
 │   ├── user.md                  # What the agent knows about this user
 │   ├── memory.md                # Long-term notes
-│   ├── history.md               # Current conversation session
+│   ├── history.jsonl            # Current conversation session (JSONL)
+│   ├── files/                   # Downloaded attachments
 │   └── sessions/
-│       ├── 20250601-143022.md   # Archived session
-│       └── 20250602-091500.md
+│       ├── 20250601-143022.jsonl # Archived session
+│       └── 20250602-091500.jsonl
 ├── bob@example.com/             # Another user (fully isolated)
 │   ├── user.md
-│   ├── history.md
+│   ├── history.jsonl
 │   └── sessions/
 ├── room@conference.example.com/ # MUC room (same structure as users)
 │   ├── instructions.md          # Room-specific override (optional)
@@ -27,7 +28,7 @@ data/memory/
 │   ├── personality.md           # Room-specific override (optional)
 │   ├── user.md                  # Room-specific context ("about this room")
 │   ├── memory.md                # Room-specific notes
-│   ├── history.md
+│   ├── history.jsonl
 │   └── sessions/
 ```
 
@@ -232,38 +233,42 @@ Example:
 - 2025-06-05: Prefers Rust over Go for systems programming
 ```
 
-### `history.md`
+### `history.jsonl`
 
-The current conversation session. Each message is stored with a markdown header:
+The current conversation session in JSONL format (one JSON object per line). The first line is a session header, followed by message entries:
 
-```markdown
-### user (alice@example.com)
-Hello, how are you?
-
-### assistant
-I'm doing well! How can I help you today?
-
-### user (alice@example.com)
-Can you explain XEP-0045?
+```json
+{"type":"session","version":1,"created":"2025-06-01T14:30:22Z","jid":"alice@example.com"}
+{"type":"message","role":"user","content":"Hello, how are you?","msg_id":"stanza-001","sender":"alice@example.com","ts":"2025-06-01T14:30:23Z"}
+{"type":"message","role":"assistant","content":"I'm doing well! How can I help?","msg_id":"a1b2c3d4","ts":"2025-06-01T14:30:24Z"}
 ```
 
-User messages include the JID in parentheses for traceability (especially important in MUC rooms). Assistant messages have no JID since the agent identity may change. The parser handles both the new `### user (jid)` format and the legacy `### user` format.
+**Content is clean:** The `content` field stores only conversational text. All metadata (msg_id, sender, timestamp) is in dedicated structured fields — never embedded in the text.
+
+**LLM sees only content:** When loading history for the LLM, `parse_session()` converts entries to plain text messages. Runtime metadata (msg_id, timestamps) is never passed to the model. In MUC rooms, sender nicks are prepended as a natural text prefix (e.g., `"alice@muc: Hello!"`). In 1:1 chats, no sender prefix is needed.
+
+See `docs/SESSION_FORMAT.md` for the full JSONL format specification.
+
+### `files/`
+
+Downloaded file attachments (images, PDFs, documents). Each file is stored with a UUID prefix to prevent collisions. Supported types are converted to Anthropic API content blocks for multi-modal LLM processing.
 
 ### `sessions/`
 
-Archived sessions created by the `/new` command. Each file is named with a timestamp: `YYYYMMDD-HHMMSS.md`. These are preserved even when the user runs `/forget`.
+Archived sessions created by the `/new` command. Each file is named with a timestamp: `YYYYMMDD-HHMMSS.jsonl`. These are preserved even when the user runs `/forget`.
 
 ## Slash commands that affect memory
 
 | Command | Effect |
 |---------|--------|
-| `/new` | Archives `history.md` to `sessions/` and starts fresh |
-| `/forget` | Erases `history.md`, `user.md`, and `memory.md` (archives preserved) |
+| `/new` | Archives `history.jsonl` to `sessions/` and starts fresh |
+| `/forget` | Erases `history.jsonl`, `user.md`, and `memory.md` (archives preserved) |
 | `/status` | Shows session stats and which workspace files are loaded |
 
 ## Migration from legacy format
 
-If a JID directory contains `context.md` but no `user.md`, the agent transparently reads `context.md` as the user profile. New writes go to `user.md`. No manual migration is needed.
+- **User profile:** If a JID directory contains `context.md` but no `user.md`, the agent transparently reads `context.md` as the user profile. New writes go to `user.md`. No manual migration is needed.
+- **Session format:** The agent now uses JSONL (`history.jsonl`) instead of markdown (`history.md`). Legacy `.md` history files are cleaned up by `/forget`. Archived sessions may be `.jsonl` or `.md` — both are counted by `session_count()`.
 
 ## Migration from OpenClaw
 
