@@ -1089,6 +1089,7 @@ The agent initiates, not just responds.
 - [ ] Heartbeat / keepalive for long-lived connections
 - [ ] Webhook ingestion — external events trigger agent actions
 - [ ] PubSub subscription — agent reacts to XMPP PubSub events
+- [ ] Mastodon integration — skill + inbound event channel via ActivityPub
 - [ ] MCP bridge — leverage existing MCP servers as skills
 - [ ] Agent-generated skills: supervised proposals (LLM drafts, human approves)
 - [ ] XMPP Stream Management (XEP-0198) — message acknowledgment, session resumption, reliability for unstable networks
@@ -1250,6 +1251,127 @@ To mitigate risks:
 | High-frequency calls                    | Native Wasm (lower overhead) |
 | Community/third-party maintained        | MCP bridge                   |
 | Custom business logic                   | Native Wasm                  |
+
+### Mastodon integration
+
+The agent can connect to Mastodon (and other ActivityPub-compatible services) both as a **skill** for posting/reading and as an **inbound event channel** for receiving notifications and mentions.
+
+#### Dual-mode architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        LLM (Claude)                         │
+│    sees: mastodon_post, mastodon_search, mastodon_reply     │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│                     Skill Registry                          │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              MastodonSkill (builtin)                │    │
+│  │   • Post status updates                             │    │
+│  │   • Reply to conversations                          │    │
+│  │   • Search posts and users                          │    │
+│  │   • Read timelines (home, local, federated)         │    │
+│  │   • Manage favorites and boosts                     │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                   Event Channel (inbound)                   │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │           Mastodon Streaming API Client             │    │
+│  │   • Mentions → trigger agent response               │    │
+│  │   • DMs → route to conversation handler             │    │
+│  │   • Followed users' posts → optional monitoring     │    │
+│  │   • Hashtag streams → topic-based triggers          │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Skill: Mastodon tools
+
+Tools exposed to the LLM for outbound actions:
+
+| Tool                  | Description                                      |
+|-----------------------|--------------------------------------------------|
+| `mastodon_post`       | Post a new status (with optional media, CW, visibility) |
+| `mastodon_reply`      | Reply to a specific status                       |
+| `mastodon_search`     | Search for posts, users, or hashtags             |
+| `mastodon_timeline`   | Read home, local, or federated timeline          |
+| `mastodon_thread`     | Get full conversation thread for a status        |
+| `mastodon_favorite`   | Favorite a status                                |
+| `mastodon_boost`      | Boost (reblog) a status                          |
+| `mastodon_dm`         | Send a direct message to a user                  |
+
+#### Inbound event channel
+
+The agent maintains a persistent WebSocket connection to Mastodon's streaming API:
+
+- **Mentions** — When someone @mentions the agent's Mastodon account, the mention is routed to the LLM for response. The agent can reply directly on Mastodon.
+- **Direct messages** — Mastodon DMs are treated like XMPP 1:1 chats. The agent can maintain per-user conversation context keyed by Mastodon account ID.
+- **Followed accounts** — Optionally monitor posts from specific accounts and trigger actions (e.g., summarize news from followed journalists, alert on posts from a monitored service account).
+- **Hashtag streams** — Subscribe to hashtag streams and react to relevant posts (e.g., monitor #fluuxagent mentions).
+
+#### Configuration
+
+```toml
+[channels.mastodon]
+enabled = true
+instance = "https://mastodon.social"        # Or any ActivityPub server
+access_token = "${MASTODON_ACCESS_TOKEN}"   # OAuth token
+
+# Inbound event handling
+[channels.mastodon.events]
+mentions = true                             # Respond to @mentions
+direct_messages = true                      # Handle DMs as conversations
+hashtags = ["fluuxagent", "aiassistant"]    # Monitor these hashtags
+
+# Optional: monitor specific accounts
+follow_accounts = ["@news@mastodon.social"]
+
+# Rate limiting and behavior
+[channels.mastodon.limits]
+max_posts_per_hour = 10                     # Prevent spam
+reply_delay_seconds = 5                     # Avoid appearing too bot-like
+```
+
+#### Memory and context
+
+Mastodon conversations are stored in the agent's memory system:
+
+```
+data/memory/
+├── mastodon/
+│   ├── @user@instance/                     # Per-user context (like JID directories)
+│   │   ├── history.jsonl
+│   │   └── context.md
+│   └── threads/                            # Thread context for multi-post conversations
+│       └── {status_id}.jsonl
+```
+
+#### Cross-channel bridging
+
+The agent can bridge XMPP and Mastodon:
+
+- **XMPP user requests Mastodon action** — "Post to Mastodon: Just deployed the new version!"
+- **Mastodon mention triggers XMPP notification** — A mention on Mastodon can notify the admin via XMPP DM
+- **Unified identity** — The agent maintains consistent persona across both channels
+
+#### Security considerations
+
+- **Access token scope** — Request minimal OAuth scopes (read, write:statuses, write:conversations). Avoid admin scopes.
+- **Rate limiting** — Respect instance rate limits. Implement local rate limiting to prevent accidental spam.
+- **Content filtering** — Apply the same prompt injection detection used for XMPP messages.
+- **Instance rules** — Comply with instance ToS. Don't auto-boost or auto-favorite without explicit user instruction.
+
+#### Use cases
+
+- **Social media presence** — Agent maintains a Mastodon presence, responds to questions, shares updates
+- **Cross-platform assistant** — Users can interact via XMPP or Mastodon based on preference
+- **Monitoring and alerts** — Track mentions of a brand/project across the fediverse
+- **Community engagement** — Participate in hashtag discussions, answer questions from the community
 
 ---
 

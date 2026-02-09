@@ -201,7 +201,8 @@ impl AgentRuntime {
                             continue;
                         }
 
-                        info!("Processing message from {}: {}", msg.from, msg.body);
+                        info!("Processing message from {}", msg.from);
+                        debug!("Message body from {}: {}", msg.from, msg.body);
 
                         // Slash commands are intercepted before the LLM
                         if msg.body.starts_with('/') {
@@ -835,12 +836,12 @@ async fn agentic_loop(
         // Log tool calls
         for tc in &response.tool_calls {
             info!(
-                "Tool call [round {}/{}]: {}({})",
+                "Tool call [round {}/{}]: {}",
                 round + 1,
                 MAX_TOOL_ROUNDS,
                 tc.name,
-                tc.input,
             );
+            debug!("Tool input for {}: {}", tc.name, tc.input);
         }
 
         // Append assistant message with the raw content blocks (text + tool_use)
