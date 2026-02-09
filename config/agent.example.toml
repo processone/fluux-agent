@@ -92,6 +92,22 @@ path = "./data/memory"
 # [skills.memory]
 # enabled = true
 
+# URL fetch — lets the LLM read web page content at a given URL.
+# No API key needed — uses direct HTTP(S) requests.
+# [skills.url_fetch]
+# enabled = true
+
+# --- Connection keepalive ---
+# Detects dead TCP connections (e.g. after machine sleep/wake).
+# Sends RFC 6120 whitespace pings and applies a read timeout.
+# Enabled by default with sensible defaults; set enabled = false
+# to disable if your server handles keepalive or you experience
+# false disconnects.
+# [keepalive]
+# enabled = true
+# ping_interval_secs = 60      # how often to send a whitespace ping
+# read_timeout_secs = 300      # declare connection dead after this much silence
+
 # --- Future sections (v0.2+) ---
 
 # [sandbox]

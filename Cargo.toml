@@ -63,5 +63,8 @@ url = "2"
 # Date/time (session timestamps)
 chrono = "0.4"
 
+# HTML to text conversion (for url_fetch skill)
+html2text = "0.14"
+
 [dev-dependencies]
 tempfile = "3"

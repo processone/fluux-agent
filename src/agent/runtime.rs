@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -65,7 +66,32 @@ impl AgentRuntime {
     ) -> Result<DisconnectReason> {
         info!("Agent runtime started — waiting for messages...");
 
-        while let Some(event) = event_rx.recv().await {
+        // Set up keepalive ping interval
+        let ping_enabled = self.config.keepalive.enabled;
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(
+            self.config.keepalive.ping_interval_secs,
+        ));
+        // The first tick completes immediately; consume it so we don't
+        // send a ping right after connecting.
+        ping_interval.tick().await;
+
+        loop {
+            let event = tokio::select! {
+                event = event_rx.recv() => {
+                    match event {
+                        Some(e) => e,
+                        None => return Ok(DisconnectReason::ConnectionLost),
+                    }
+                }
+                _ = ping_interval.tick(), if ping_enabled => {
+                    if cmd_tx.send(XmppCommand::Ping).await.is_err() {
+                        warn!("Failed to send keepalive ping (channel closed)");
+                        return Ok(DisconnectReason::ConnectionLost);
+                    }
+                    continue;
+                }
+            };
+
             match event {
                 XmppEvent::Connected => {
                     info!("✓ Agent is online and ready");
@@ -492,11 +518,12 @@ impl AgentRuntime {
                 }
                 XmppEvent::Error(e) => {
                     error!("XMPP error: {e}");
+                    if e.contains("Read timeout") {
+                        return Ok(DisconnectReason::ConnectionLost);
+                    }
                 }
             }
         }
-
-        Ok(DisconnectReason::ConnectionLost)
     }
 
     // ── Slash commands ────────────────────────────────────
@@ -606,12 +633,23 @@ impl AgentRuntime {
             format!("Skills: {}", self.skills.skill_names().join(", "))
         };
 
+        let keepalive_info = if self.config.keepalive.enabled {
+            format!(
+                "Keepalive: ping {}s / timeout {}s",
+                self.config.keepalive.ping_interval_secs,
+                self.config.keepalive.read_timeout_secs,
+            )
+        } else {
+            "Keepalive: disabled".to_string()
+        };
+
         Ok(format!(
             "{} — status\n\
              Uptime: {hours}h {minutes}m\n\
              Mode: {}\n\
              LLM: {}\n\
              {skills_info}\n\
+             {keepalive_info}\n\
              {context_info}\n\
              Workspace: instructions={}, identity={}, personality={}\n\
              {domain_info}",
@@ -1149,6 +1187,7 @@ mod tests {
             },
             rooms: vec![],
             skills: SkillsConfig::default(),
+            keepalive: crate::config::KeepaliveConfig::default(),
         };
 
         let llm: Arc<dyn LlmClient> = Arc::new(AnthropicClient::new(config.llm.clone()));

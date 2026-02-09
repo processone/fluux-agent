@@ -46,6 +46,7 @@ impl XmppClient {
     /// On success, the event loop is spawned as a background task.
     pub async fn connect(
         self,
+        read_timeout: Option<Duration>,
     ) -> Result<(mpsc::Receiver<XmppEvent>, mpsc::Sender<XmppCommand>), XmppError> {
         let (event_tx, event_rx) = mpsc::channel::<XmppEvent>(100);
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(100);
@@ -57,7 +58,9 @@ impl XmppClient {
         let _ = event_tx.send(XmppEvent::Connected).await;
 
         // Spawn the event loop as a background task
-        tokio::spawn(Self::run_event_loop(reader, writer, event_tx, cmd_rx));
+        tokio::spawn(Self::run_event_loop(
+            reader, writer, event_tx, cmd_rx, read_timeout,
+        ));
 
         Ok((event_rx, cmd_tx))
     }
@@ -273,6 +276,7 @@ impl XmppClient {
         writer: W,
         event_tx: mpsc::Sender<XmppEvent>,
         mut cmd_rx: mpsc::Receiver<XmppCommand>,
+        read_timeout: Option<Duration>,
     ) where
         R: AsyncReadExt + Unpin + Send + 'static,
         W: AsyncWriteExt + Unpin + Send + 'static,
@@ -287,7 +291,31 @@ impl XmppClient {
             let mut buf = Vec::new();
 
             loop {
-                match xml_reader.read_event_into_async(&mut buf).await {
+                let read_result = if let Some(timeout_dur) = read_timeout {
+                    match tokio::time::timeout(
+                        timeout_dur,
+                        xml_reader.read_event_into_async(&mut buf),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_elapsed) => {
+                            warn!(
+                                "Read timeout ({timeout_dur:?}) — connection appears dead"
+                            );
+                            let _ = event_tx_clone
+                                .send(XmppEvent::Error(
+                                    "Read timeout — connection dead".into(),
+                                ))
+                                .await;
+                            break;
+                        }
+                    }
+                } else {
+                    xml_reader.read_event_into_async(&mut buf).await
+                };
+
+                match read_result {
                     Ok(Event::Eof) => {
                         warn!("XMPP connection closed by server");
                         let _ = event_tx_clone
@@ -351,6 +379,16 @@ impl XmppClient {
         let write_handle = tokio::spawn(async move {
             let mut writer = writer;
             while let Some(cmd) = cmd_rx.recv().await {
+                // Handle keepalive ping separately (no XML payload)
+                if matches!(cmd, XmppCommand::Ping) {
+                    if let Err(e) = writer.write_all(b" ").await {
+                        error!("Keepalive write error: {e}");
+                        break;
+                    }
+                    debug!("Sent keepalive ping");
+                    continue;
+                }
+
                 let xml = match cmd {
                     XmppCommand::SendMessage { to, body, id } => {
                         stanzas::build_message(None, &to, &body, id.as_deref())
@@ -374,6 +412,7 @@ impl XmppClient {
                         stanzas::build_muc_join(&room, &nick, None)
                     }
                     XmppCommand::SendRaw(raw) => raw,
+                    XmppCommand::Ping => unreachable!(),
                 };
 
                 if let Err(e) = writer.write_all(xml.as_bytes()).await {

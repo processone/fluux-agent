@@ -4,9 +4,10 @@ pub mod sasl;
 pub mod stanzas;
 
 use std::fmt;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::config::{ConnectionMode, ServerConfig};
+use crate::config::{ConnectionMode, KeepaliveConfig, ServerConfig};
 use component::{XmppCommand, XmppComponent, XmppEvent};
 
 /// Categorized XMPP connection errors.
@@ -47,16 +48,26 @@ impl std::error::Error for XmppError {}
 /// Connects to the XMPP server using the mode specified in config.
 /// Returns the same channel pair regardless of mode.
 /// `allowed_jids` is used for automatic presence subscription in C2S mode.
+/// `keepalive` controls whitespace pings and read timeout.
 pub async fn connect(
     config: ServerConfig,
     allowed_jids: Vec<String>,
+    keepalive: &KeepaliveConfig,
 ) -> Result<(mpsc::Receiver<XmppEvent>, mpsc::Sender<XmppCommand>), XmppError> {
+    let read_timeout = if keepalive.enabled {
+        Some(Duration::from_secs(keepalive.read_timeout_secs))
+    } else {
+        None
+    };
+
     match &config.mode {
-        ConnectionMode::Component { .. } => XmppComponent::new(config).connect().await,
+        ConnectionMode::Component { .. } => {
+            XmppComponent::new(config).connect(read_timeout).await
+        }
         ConnectionMode::Client { .. } => {
             client::XmppClient::new(config)
                 .with_allowed_jids(allowed_jids)
-                .connect()
+                .connect(read_timeout)
                 .await
         }
     }

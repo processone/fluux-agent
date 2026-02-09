@@ -19,7 +19,7 @@ use crate::agent::runtime::AgentRuntime;
 use crate::backoff::Backoff;
 use crate::config::Config;
 use crate::llm::{AnthropicClient, LlmClient, OllamaClient};
-use crate::skills::builtin::{MemoryRecallSkill, MemoryStoreSkill, WebSearchSkill};
+use crate::skills::builtin::{MemoryRecallSkill, MemoryStoreSkill, UrlFetchSkill, WebSearchSkill};
 use crate::skills::SkillRegistry;
 use crate::xmpp::component::DisconnectReason;
 
@@ -172,7 +172,23 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Some(ref uf_config) = config.skills.url_fetch {
+        if uf_config.enabled {
+            info!("Registering builtin skill: url_fetch");
+            skills.register(Box::new(UrlFetchSkill::new()));
+        }
+    }
+
     info!("Skills: {} registered", skills.len());
+    if config.keepalive.enabled {
+        info!(
+            "Keepalive: ping every {}s, read timeout {}s",
+            config.keepalive.ping_interval_secs,
+            config.keepalive.read_timeout_secs,
+        );
+    } else {
+        info!("Keepalive: disabled");
+    }
     let runtime = AgentRuntime::new(config.clone(), llm, memory, file_downloader, skills);
 
     let mut backoff = Backoff::new(
@@ -191,6 +207,7 @@ async fn main() -> Result<()> {
         match xmpp::connect(
             config.server.clone(),
             config.agent.allowed_jids.clone(),
+            &config.keepalive,
         )
         .await
         {

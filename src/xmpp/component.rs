@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -47,6 +49,9 @@ pub enum XmppCommand {
     /// Join a MUC room (XEP-0045)
     JoinMuc { room: String, nick: String },
     SendRaw(String),
+    /// Whitespace keepalive ping (RFC 6120 §4.6.1).
+    /// The write task sends a single space character.
+    Ping,
 }
 
 /// Outbound chat state types (XEP-0085)
@@ -95,6 +100,7 @@ impl XmppComponent {
     /// - `cmd_tx`: sends commands (outgoing messages, etc.)
     pub async fn connect(
         self,
+        read_timeout: Option<Duration>,
     ) -> Result<(mpsc::Receiver<XmppEvent>, mpsc::Sender<XmppCommand>), XmppError> {
         let (event_tx, event_rx) = mpsc::channel::<XmppEvent>(100);
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(100);
@@ -107,7 +113,7 @@ impl XmppComponent {
 
         // Phase 3: Spawn the event loop as a background task
         tokio::spawn(Self::run_event_loop(
-            reader, writer, domain, event_tx, cmd_rx,
+            reader, writer, domain, event_tx, cmd_rx, read_timeout,
         ));
 
         Ok((event_rx, cmd_tx))
@@ -204,6 +210,7 @@ impl XmppComponent {
         domain: String,
         event_tx: mpsc::Sender<XmppEvent>,
         mut cmd_rx: mpsc::Receiver<XmppCommand>,
+        read_timeout: Option<Duration>,
     ) {
         // Read task — uses quick-xml async Reader for proper XML parsing
         let event_tx_clone = event_tx.clone();
@@ -215,7 +222,31 @@ impl XmppComponent {
             let mut buf = Vec::new();
 
             loop {
-                match xml_reader.read_event_into_async(&mut buf).await {
+                let read_result = if let Some(timeout_dur) = read_timeout {
+                    match tokio::time::timeout(
+                        timeout_dur,
+                        xml_reader.read_event_into_async(&mut buf),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_elapsed) => {
+                            warn!(
+                                "Read timeout ({timeout_dur:?}) — connection appears dead"
+                            );
+                            let _ = event_tx_clone
+                                .send(XmppEvent::Error(
+                                    "Read timeout — connection dead".into(),
+                                ))
+                                .await;
+                            break;
+                        }
+                    }
+                } else {
+                    xml_reader.read_event_into_async(&mut buf).await
+                };
+
+                match read_result {
                     Ok(Event::Eof) => {
                         warn!("XMPP connection closed by server");
                         let _ = event_tx_clone
@@ -279,6 +310,16 @@ impl XmppComponent {
         let write_handle = tokio::spawn(async move {
             let mut writer = writer;
             while let Some(cmd) = cmd_rx.recv().await {
+                // Handle keepalive ping separately (no XML payload)
+                if matches!(cmd, XmppCommand::Ping) {
+                    if let Err(e) = writer.write_all(b" ").await {
+                        error!("Keepalive write error: {e}");
+                        break;
+                    }
+                    debug!("Sent keepalive ping");
+                    continue;
+                }
+
                 let xml = match cmd {
                     XmppCommand::SendMessage { to, body, id } => {
                         stanzas::build_message(Some(&domain), &to, &body, id.as_deref())
@@ -302,6 +343,7 @@ impl XmppComponent {
                         stanzas::build_muc_join(&room, &nick, Some(&domain))
                     }
                     XmppCommand::SendRaw(raw) => raw,
+                    XmppCommand::Ping => unreachable!(),
                 };
 
                 if let Err(e) = writer.write_all(xml.as_bytes()).await {

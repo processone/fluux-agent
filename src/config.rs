@@ -13,6 +13,10 @@ pub struct Config {
     /// Skill configuration. If absent, no skills are registered.
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Connection keepalive configuration.
+    /// Enabled by default with sensible defaults.
+    #[serde(default)]
+    pub keepalive: KeepaliveConfig,
 }
 
 /// Configuration for a MUC room (XEP-0045)
@@ -113,6 +117,8 @@ pub struct SkillsConfig {
     pub web_search: Option<WebSearchConfig>,
     /// Memory (knowledge store) skill configuration.
     pub memory: Option<MemorySkillConfig>,
+    /// URL fetch skill configuration.
+    pub url_fetch: Option<UrlFetchConfig>,
 }
 
 /// Configuration for the `memory_store` and `memory_recall` builtin skills.
@@ -124,6 +130,58 @@ pub struct MemorySkillConfig {
     /// Enable the memory skills. Must be `true` to register them.
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// Configuration for the `url_fetch` builtin skill.
+///
+/// Lets the LLM fetch a URL and extract readable text content.
+/// No API keys needed — uses direct HTTP(S) requests.
+#[derive(Debug, Deserialize, Clone)]
+pub struct UrlFetchConfig {
+    /// Enable the url_fetch skill. Must be `true` to register it.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Keepalive configuration for detecting dead XMPP connections.
+///
+/// When enabled, the agent periodically sends whitespace pings (RFC 6120 §4.6.1)
+/// and applies a read timeout to detect stale TCP connections
+/// (e.g. after machine sleep/wake cycles).
+#[derive(Debug, Deserialize, Clone)]
+pub struct KeepaliveConfig {
+    /// Enable keepalive. Default: true.
+    #[serde(default = "default_keepalive_enabled")]
+    pub enabled: bool,
+    /// Interval between whitespace pings, in seconds. Default: 60.
+    #[serde(default = "default_ping_interval")]
+    pub ping_interval_secs: u64,
+    /// Read timeout in seconds. If no data is received for this duration,
+    /// the connection is considered dead. Default: 300 (5 minutes).
+    #[serde(default = "default_read_timeout")]
+    pub read_timeout_secs: u64,
+}
+
+fn default_keepalive_enabled() -> bool {
+    true
+}
+
+fn default_ping_interval() -> u64 {
+    60
+}
+
+fn default_read_timeout() -> u64 {
+    300
+}
+
+impl Default for KeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_keepalive_enabled(),
+            ping_interval_secs: default_ping_interval(),
+            read_timeout_secs: default_read_timeout(),
+        }
+    }
 }
 
 /// Configuration for the `web_search` builtin skill.
@@ -278,6 +336,7 @@ mod tests {
             },
             rooms: vec![],
             skills: SkillsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
         }
     }
 
@@ -465,5 +524,49 @@ mod tests {
         let config = config_with_jids(vec!["*"]);
         assert!(config.is_domain_allowed("alice@localhost/Conversations.abc"));
         assert!(!config.is_domain_allowed("alice@evil.com/Conversations.abc"));
+    }
+
+    // ── KeepaliveConfig tests ────────────────────────────
+
+    #[test]
+    fn test_keepalive_defaults() {
+        let ka = KeepaliveConfig::default();
+        assert!(ka.enabled);
+        assert_eq!(ka.ping_interval_secs, 60);
+        assert_eq!(ka.read_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_keepalive_default_when_absent() {
+        // Config without [keepalive] section → defaults apply
+        let config = config_with_jids(vec![]);
+        assert!(config.keepalive.enabled);
+        assert_eq!(config.keepalive.ping_interval_secs, 60);
+        assert_eq!(config.keepalive.read_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_keepalive_disabled_toml() {
+        let toml = r#"
+            enabled = false
+        "#;
+        let ka: KeepaliveConfig = toml::from_str(toml).unwrap();
+        assert!(!ka.enabled);
+        // Other fields still get defaults
+        assert_eq!(ka.ping_interval_secs, 60);
+        assert_eq!(ka.read_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_keepalive_custom_values_toml() {
+        let toml = r#"
+            enabled = true
+            ping_interval_secs = 30
+            read_timeout_secs = 120
+        "#;
+        let ka: KeepaliveConfig = toml::from_str(toml).unwrap();
+        assert!(ka.enabled);
+        assert_eq!(ka.ping_interval_secs, 30);
+        assert_eq!(ka.read_timeout_secs, 120);
     }
 }
