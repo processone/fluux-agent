@@ -1,20 +1,52 @@
 # Fluux Agent
 
-**A framework for open and federated AI agent networks — built on XMPP with security in mind.**
+A framework for open and federated AI agent networks built on XMPP, with security as a first-class concern.
 
-Fluux Agent is the foundation for a new kind of AI infrastructure: autonomous agents that communicate over an open, federated protocol instead of walled-garden APIs. Today it's a single-agent runtime that connects to any XMPP server. Tomorrow it's a network where your agent talks to mine — across domains, across organizations — without a centralized platform controlling the conversation.
+[![Release](https://img.shields.io/github/v/release/processone/fluux-agent)](https://github.com/processone/fluux-agent/releases)
+[![Downloads](https://img.shields.io/github/downloads/processone/fluux-agent/total)](https://github.com/processone/fluux-agent/releases)
+[![Repo Size](https://img.shields.io/github/repo-size/processone/ejabberd)](https://github.com/processone/fluux-agent/releases)
+[![Build Status](https://github.com/processone/fluux-agent/workflows/CI/badge.svg)](https://github.com/processone/fluux-agent/actions)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-This is the beginning. The runtime you see here — XMPP connectivity, conversational memory, LLM integration — is the first building block. The roadmap leads to a skills system, sandboxed execution, an agent-to-agent protocol, and ultimately **federation**: agents on different servers discovering each other, delegating tasks, and collaborating, all over standard XMPP infrastructure that has been battle-tested for 20 years.
+Fluux Agent is the foundation for a new kind of AI infrastructure: autonomous agents that communicate over an open, federated protocol instead of closed APIs. Today it is a single-agent runtime that connects to any XMPP server. Tomorrow it becomes a network where your agent can talk to mine, across domains and organizations, without a centralized platform controlling the exchange.
+
+This is the beginning. The runtime you see here (XMPP connectivity, conversational memory, LLM integration) is the first building block. The roadmap leads to a skills system, sandboxed execution, an agent-to-agent protocol, and ultimately federation: agents on different servers discovering each other, delegating tasks, and collaborating over standard XMPP infrastructure that has been battle-tested for more than 20 years.
+
+## Table of Contents
+
+- [Screenshots](#screenshots)
+- [Why](#why)
+- [Architecture](#architecture)
+- [Vision](#vision)
+- [Status](#status)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Multi-User Chat (MUC)](#multi-user-chat-muc)
+- [License](#license)
+- [Fluux Agent vs OpenClaw](#fluux-agent-vs-openclaw)
+
+## Screenshots
+
+<div align="center">
+
+*Click on any screenshot to view full size*
+
+| Fluux Agent in CLI | Connect with Fluux Messenger |
+|-------------------|------------------------------|
+| <a href="assets/readme/cli-agent.png"><img src="assets/readme/cli-agent.png" width="250" style="border-radius: 8px;" alt="CLI Agent"/></a> | <a href="assets/readme/connect-fluux-messenger.png"><img src="assets/readme/connect-fluux-messenger.png" width="250" style="border-radius: 8px;" alt="Connect with Fluux Messenger (or any XMPP client)"/></a> |
+| *Clean and minimal CLI agent* | Connect with [Fluux Messenger](https://github.com/processone/fluux-messenger) (or any XMPP client) |
+
+</div>
 
 ## Why
 
-OpenClaw demonstrated the massive demand for personal AI assistants that actually act. But its architecture — Node.js bridges to every messaging platform, root system access, JSON file storage — poses fundamental security, reliability, and interoperability problems. More critically, it's a closed system: agents can't talk to each other, and every integration is a bespoke bridge that the project must maintain.
+OpenClaw demonstrated the demand for personal AI assistants that actually act. But its architecture (Node.js bridges to every messaging platform, root system access, JSON file storage) creates serious security, reliability, and interoperability issues. More importantly, it is a closed system: agents cannot talk to each other, and every integration is a bespoke bridge the project must maintain.
 
-The AI agent ecosystem needs what email gave us for messages and the web gave us for documents: **an open protocol where any agent can reach any other agent, regardless of who hosts it.**
+The AI agent ecosystem needs what email gave us for messages and the web gave us for documents: an open protocol where any agent can reach any other agent, regardless of who hosts it.
 
-XMPP already provides this. It has solved reliable message routing, authentication, presence, PubSub for events, message history (MAM), multi-device synchronization, and most importantly **federation** for 20 years. Billions of messages have been routed through XMPP infrastructure. The protocol is extensible by design — adding agent-specific semantics (skill discovery, task delegation, action confirmation) is exactly the kind of problem XMPP extensions were made for.
+XMPP already solves this problem. It provides reliable message routing, authentication, presence, PubSub for events, message archives (MAM), multi-device synchronization, and federation. It has been doing this at Internet scale for decades. The protocol is extensible by design, and adding agent-specific semantics such as skill discovery, task delegation, or action confirmation fits naturally into the XMPP extension model.
 
-Fluux Agent brings these two worlds together: the power of modern AI agents with the robustness of proven, federated messaging infrastructure.
+Fluux Agent connects modern AI agents to this proven messaging backbone.
 
 ## Architecture
 
@@ -48,15 +80,32 @@ Fluux Agent brings these two worlds together: the power of modern AI agents with
 
 ### Key Principles
 
-- **Open and federated** — Agents communicate over XMPP, an open standard with native federation. No vendor lock-in, no centralized platform. Your agent, your server, your rules.
-- **Total decoupling** — The agent is a standard XMPP component. It works with any XMPP server, not just ejabberd.
-- **Designed for teams** — Each user has their own isolated conversation context and memory directory, while shared skills and procedures are accessible to everyone. One agent instance serves the whole team with clean separation of personal data and shared capabilities.
-- **Security by design** — Defense-in-depth with 5 independent layers: declarative capabilities, action validation, Wasm sandbox, kernel sandboxing (Landlock/seccomp), and process isolation. The LLM never directly touches the system. In corporate deployments, the agent will be able to scan conversations and detect prompt injection attempts, limiting the risk of adversarial manipulation through crafted messages. See [Security Architecture](docs/SECURITY.md).
-- **No public endpoint required** — XMPP acts as your inbound transport. The agent runs on your laptop or private network and connects to an XMPP server (your own or a public one like `conversations.im`). Services can reach your agent by sending XMPP messages — no need to expose webhooks or open firewall ports. This makes local development and secure production deployments trivial.
-- **Enterprise control layer** — XMPP + Fluux Agent creates an AI gateway for organizations. The XMPP server can act as an LLM firewall, scanning traffic for prompt injection before messages reach the agent. Model changes, cost optimization, and configuration updates happen server-side without touching client applications. End users interact with a stable XMPP address while the backend switches between Claude, Ollama, or other models transparently.
-- **Proactivity** — Cron jobs, PubSub subscriptions, webhooks. The agent can initiate conversations, not just respond.
-- **Federation** — My agent `agent.domain-a.com` talks to your agent `agent.domain-b.com` via XMPP federation. No centralized platform.
-- **Collaborative by design** — The goal of Fluux Agent is to improve collaboration, not replace human judgment. The system keeps humans in the loop for decisions that matter — confirmation prompts, skill approvals, and oversight of agent actions. Skills are not exclusively AI-powered: human experts can expose their knowledge and capabilities as skills, creating a hybrid network where agents route tasks to the best available resource, whether that's an LLM, an API, or a person.
+- **Open and federated**  
+  Agents communicate over XMPP, an open standard with native federation. No vendor lock-in, no centralized platform. Your agent, your server, your rules.
+
+- **Total decoupling**  
+  The agent is a standard XMPP component. It works with any XMPP server, not just ejabberd.
+
+- **Designed for teams**  
+  Each user has an isolated conversation context and memory, while shared skills and procedures remain accessible to everyone. One agent instance can serve an entire team without mixing personal data.
+
+- **Security by design**  
+  Defense in depth across multiple layers: declarative capabilities, action validation, a Wasm sandbox, kernel sandboxing (Landlock or seccomp), and process isolation. The LLM never touches the system directly.
+
+- **No public endpoint required**  
+  XMPP acts as the inbound transport. The agent can run on a laptop or private network and still be reachable, without exposing webhooks or firewall ports.
+
+- **Enterprise control layer**  
+  XMPP plus Fluux Agent forms an AI gateway. The server can filter traffic, detect prompt injection attempts, and control model selection or cost centrally.
+
+- **Proactivity**  
+  Cron jobs, PubSub subscriptions, and webhooks allow the agent to initiate conversations, not just reply.
+
+- **Federation**  
+  An agent on `domain-a.com` can talk to another on `domain-b.com` through standard XMPP federation.
+
+- **Human-in-the-loop collaboration**  
+  Fluux Agent is designed to support collaboration, not replace judgment. Destructive actions require confirmation, and skills can be implemented by humans as well as machines.
 
 ## Vision
 
@@ -73,18 +122,20 @@ Today (v0.1)                         Tomorrow (v1.0)
                                           └────────────────────┘
 ```
 
-Fluux Agent starts as a personal AI assistant — one user, one agent, one LLM. But the architecture is designed from day one to scale to a federated network of agents that discover each other's skills, delegate tasks, and collaborate across organizational boundaries. The protocol layer (XMPP) already handles the hard parts: routing, presence, authentication, encryption, and federation. Fluux Agent adds the AI semantics on top.
+Fluux Agent starts as a personal assistant, but it is built from day one to evolve into a federated network of collaborating agents. XMPP already handles routing, presence, authentication, encryption, and federation. Fluux Agent adds AI semantics on top.
 
 ## Status
 
-> **v0.1** — Foundation (tagged). Dual-mode XMPP connection (component + C2S), agentic loop with Claude API, JSONL session memory, conversation sessions, slash commands, and MUC rooms. **v0.2 in progress** — skills system (web search), LlmClient trait with Anthropic and Ollama support. See the [Roadmap](ROADMAP.md) for what's next.
+v0.1 is tagged and stable. It includes dual XMPP connection modes (component and C2S), an agentic loop, Claude integration, JSONL session memory, slash commands, and MUC support.
+
+v0.2 is in progress and focuses on the skills system, Ollama support, and model abstraction. See the [Roadmap](ROADMAP.md) for details.
 
 ### Roadmap
 
 | Phase    | Description                                                                                                                        | Status         |
 |----------|------------------------------------------------------------------------------------------------------------------------------------|----------------|
-| **v0.1** | XMPP component + C2S client + agentic loop + Claude API + JSONL memory + sessions + slash commands + MUC rooms                     | ✅ Tagged       |
-| **v0.2** | Skills system (web search), LlmClient trait, Ollama support, model tiering, proactive context learning, prompt injection detection | 🔨 In progress |
+| **v0.1** | XMPP component + C2S client + agentic loop + Claude API + JSONL memory + sessions + slash commands + MUC rooms                     | Tagged       |
+| **v0.2** | Skills system (web search), LlmClient trait, Ollama support, model tiering, proactive context learning, prompt injection detection | In progress |
 | **v0.3** | Proactivity (cron via PubSub, heartbeat), advanced MUC (room-specific prompts, invite handling)                                    | Planned        |
 | **v0.4** | Wasm sandbox (wasmtime) + Landlock                                                                                                 | Planned        |
 | **v0.5** | Agent protocol (`urn:fluux:agent:0`) — discovery, execute, confirm                                                                 | Planned        |
@@ -94,17 +145,19 @@ Fluux Agent starts as a personal AI assistant — one user, one agent, one LLM. 
 
 ### Prerequisites
 
-- Rust ≥ 1.75
-- An XMPP server (ejabberd, Prosody, Openfire...)
-- An LLM backend, either:
-  - **Ollama** running locally for private/offline deployments (no API key needed)
-  - **Anthropic API key** (Claude) for cloud-hosted models, or
+- Rust 1.75 or newer
+- An XMPP server (ejabberd, Prosody, Openfire)
+- An LLM backend:
+  - Ollama for local or offline deployments
+  - Anthropic (Claude) for hosted models
 
-Two connection modes are supported, suited to different deployment contexts:
+Two connection modes are available:
 
-**Client mode (C2S)** — The agent connects as a regular XMPP user (e.g., `bot@localhost`). No server configuration needed beyond a user account. Supports SASL PLAIN, SCRAM-SHA-1, and STARTTLS. **This is the easiest way to get started** — ideal for individuals and small teams who just want a personal AI assistant on their existing XMPP server.
+**Client mode (C2S)**  
+The agent connects as a regular XMPP user. This requires no server configuration beyond creating an account and is ideal for individuals or small teams.
 
-**Component mode (XEP-0114)** — The agent registers as a subdomain (e.g., `agent.localhost`). Requires server-side configuration but gives the agent its own address namespace, better isolation, and the ability to handle messages for an entire subdomain. **Companies and organizations** will typically prefer this mode for production deployments — it integrates the agent as a first-class service on the XMPP infrastructure rather than as a regular user account.
+**Component mode (XEP-0114)**  
+The agent registers as a subdomain. This requires server configuration but provides better isolation and is the preferred setup for production environments.
 
 ### ejabberd Configuration (component mode)
 
@@ -128,7 +181,7 @@ cp config/agent.example.toml config/agent.toml
 # With Anthropic (cloud):
 export ANTHROPIC_API_KEY="sk-ant-..."
 
-# With Ollama (local — no API key needed):
+# With Ollama (local, no API key needed):
 # Set provider = "ollama" and model = "llama3.2" in config/agent.toml
 # Make sure Ollama is running: ollama serve
 
@@ -142,7 +195,7 @@ Then, send a message to `agent.localhost` (component mode) or `bot@localhost` (c
 
 ## Configuration
 
-**Component mode:**
+### Component Mode
 
 ```toml
 [server]
@@ -153,7 +206,7 @@ component_domain = "agent.localhost"
 component_secret = "${AGENT_SECRET}"
 ```
 
-**Client mode (C2S):**
+### Client Mode (C2S)
 
 ```toml
 [server]
@@ -166,7 +219,9 @@ resource = "fluux-agent"
 tls_verify = false  # for self-signed certs (dev)
 ```
 
-**LLM — Anthropic (cloud):**
+### LLM Configuration
+
+Anthropic (cloud):
 
 ```toml
 [llm]
@@ -176,7 +231,7 @@ api_key = "${ANTHROPIC_API_KEY}"
 max_tokens_per_request = 4096
 ```
 
-**LLM — Ollama (local):**
+Ollama (local):
 
 ```toml
 [llm]
@@ -186,9 +241,9 @@ host = "http://localhost:11434"   # optional, this is the default
 max_tokens_per_request = 4096
 ```
 
-No API key is required for Ollama — just install [Ollama](https://ollama.com), pull a model (`ollama pull llama3.2`), and point the agent at it. This enables fully private, offline deployments with no cloud dependency.
+No API key is required for Ollama, just install [Ollama](https://ollama.com), pull a model (`ollama pull llama3.2`), and point the agent at it. This enables fully private, offline deployments with no cloud dependency.
 
-**Common sections:**
+### Common Configuration
 
 ```toml
 [agent]
@@ -200,7 +255,7 @@ backend = "markdown"
 path = "./data/memory"
 ```
 
-Memory is stored as human-readable markdown files — workspace files for global agent configuration and per-JID directories for isolated user data. This makes agent memory inspectable, editable, and git-friendly. Admins can customize agent behavior by creating `instructions.md`, `identity.md`, and `personality.md` in the memory root directory.
+Memory is stored as human-readable markdown files, workspace files for global agent configuration and per-JID directories for isolated user data. This makes agent memory inspectable, editable, and git-friendly. Admins can customize agent behavior by creating `instructions.md`, `identity.md`, and `personality.md` in the memory root directory.
 
 ## Commands
 
@@ -238,7 +293,7 @@ data/memory/
 │       └── 20250602-091500.jsonl  # Another archived session
 ```
 
-Global workspace files (`instructions.md`, `identity.md`, `personality.md`) are shared across all users and let admins customize the agent without touching code. When no workspace files exist, a built-in default prompt is used. Per-JID directories are strictly isolated — each user (or room) has their own `user.md`, `memory.md`, and conversation history.
+Global workspace files (`instructions.md`, `identity.md`, `personality.md`) are shared across all users and let admins customize the agent without touching code. When no workspace files exist, a built-in default prompt is used. Per-JID directories are strictly isolated, each user (or room) has their own `user.md`, `memory.md`, and conversation history.
 
 See [`data/memory/README.md`](data/memory/README.md) for the full workspace reference, file format details, and OpenClaw migration guide.
 
@@ -260,7 +315,7 @@ nick = "FluuxBot"
 
 The agent joins configured rooms on connect. It records all room messages for context and responds when its nickname is mentioned (e.g., `@FluuxBot what's the status?` or `FluuxBot: hello`). This means the LLM sees the full conversation when it's asked a question, not just the mention.
 
-Each room has its own isolated memory directory, just like 1:1 conversations — the room JID is used as the memory key. All participants in the same room share conversation context.
+Each room has its own isolated memory directory, just like 1:1 conversations, the room JID is used as the memory key. All participants in the same room share conversation context.
 
 ### Per-room identity
 
@@ -277,7 +332,7 @@ data/memory/
     personality.md                         # Room override: "Terse, technical"
 ```
 
-The lookup order is: **per-JID file → global file → none**. If a per-JID file exists and is non-empty, it wins. Otherwise the global file is used. This works for rooms *and* individual users — no config changes needed, just drop files into the directory.
+The lookup order is: **per-JID file → global file → none**. If a per-JID file exists and is non-empty, it wins. Otherwise the global file is used. This works for rooms *and* individual users: no config changes needed, just drop files into the directory.
 
 ## Project Structure
 
@@ -346,27 +401,40 @@ Fluux Agent introduces an experimental XMPP namespace `urn:fluux:agent:0` for st
 
 ## License
 
-The core is under [Apache License 2.0](LICENSE).
+The core of Fluux Agent is released under the [Apache License 2.0](LICENSE).
 
-Enterprise features (multi-agent federation, multi-tenant, audit, SSO) will be distributed under BSL 1.1 (automatic conversion to Apache 2.0 after 4 years).
-
-## Context
-
-Fluux Agent is developed by [ProcessOne](https://www.process-one.net), the company behind [ejabberd](https://www.ejabberd.im) — the XMPP server that powered the early versions of WhatsApp. 20 years of messaging infrastructure expertise, now applied to building the open foundation for federated AI agent networks.
+Enterprise-oriented features (multi-agent federation, multi-tenancy, audit logging, SSO) will be released under the Business Source License (BSL) 1.1, with automatic conversion to Apache 2.0 after four years.
 
 ---
 
 ### Fluux Agent vs OpenClaw
 
-Fluux Agent is not an OpenClaw clone in Rust. It's a fundamentally different architecture.
+Fluux Agent is not an OpenClaw rewrite in Rust. It follows a different architectural model.
 
-OpenClaw gets the abstraction layer wrong. It treats "connecting to messaging platforms" as a core feature, building bridges to Slack, Discord, Telegram, WhatsApp, etc. This creates an ever-growing matrix of protocol adapters that the project must maintain, each with its own quirks, rate limits, and breakage points.
+OpenClaw treats connections to messaging platforms as a core responsibility of the agent, with dedicated bridges for Slack, Discord, Telegram, WhatsApp, and others. This results in a growing set of protocol adapters that must be maintained individually, each with its own limitations, rate limits, and failure modes.
 
-Fluux Agent inverts the approach: **the agent speaks one native protocol (XMPP) with its full extension ecosystem** — presence, PubSub, message archive, federation, end-to-end encryption. Reaching users on other platforms is a *skill*, not a connection mode. A Telegram skill sends messages via the Telegram API. A Slack skill posts via webhooks. These are actions the agent performs, like sending an email or calling an API — not fundamental architectural layers.
+Fluux Agent takes the opposite approach. The agent speaks a single native protocol: **XMPP**, along with its mature extension ecosystem for presence, PubSub, message archives, federation, and end-to-end encryption. Interaction with external platforms is handled as *skills*, not transport layers.
 
-This distinction matters:
+Sending a Telegram message, posting to Slack, or forwarding to Discord are actions the agent performs, similar to sending an email or calling an API. They are not part of the core connectivity model.
 
-- **Bot protocols are connection modes** — how the agent receives instructions (XMPP component, XMPP C2S, and eventually Matrix or IRC as alternative bot frontends).
-- **Messaging platforms are skills** — how the agent *acts* on the world (send a Slack message, post to Discord, forward to Telegram). They belong in the skills registry alongside "search the web" or "read an email".
+This separation is intentional:
 
-The result is a simpler, more maintainable agent that leverages 20 years of proven messaging infrastructure instead of reinventing it with fragile platform bridges.
+- **Bot protocols are connection modes**  
+  They define how the agent receives instructions (XMPP component, XMPP C2S, and potentially Matrix or IRC in the future).
+
+- **Messaging platforms are skills**  
+  They define how the agent acts on the world (posting messages, forwarding content, triggering workflows).
+
+The result is a simpler, more robust architecture that builds on decades of proven messaging infrastructure instead of relying on fragile, platform-specific bridges.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=processone/fluux-agent&type=Date&theme=dark&legend=bottom-right)](https://star-history.com/#processone/fluux-agent&Date&legend=bottom-right)
+
+---
+
+<div align="center">
+
+Built with ❤️ by [ProcessOne](https://www.process-one.net), the team behind [ejabberd](https://www.ejabberd.im). Fluux Agent builds on that experience to provide an open foundation for federated AI agent networks. 
+
+</div>
