@@ -143,25 +143,14 @@ The agent can do things beyond conversation.
 - [x] LLM tool use integration (agentic loop)
 - [x] `LlmClient` trait + Ollama provider (local models via Ollama API)
 - [x] Builtin skill: web search (Tavily + Perplexity providers)
-- [x] Session file structure migration (markdown → JSONL)
-- [x] File attachments — receive images/documents via OOB (XEP-0066), download, pass to LLM
-- [x] Release build chain as GitHub Action
+- [x] Builtin skill: `memory_store` / `memory_recall` for per-JID knowledge management
 - [x] Builtin skill: URL fetch and summarize
-- [ ] LLM API error handling (retry with backoff, fallback models, graceful degradation) (example: Sorry, an error occurred: Claude API error (500 Internal Server Error): {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_0..."})
-- [ ] Builtin skill: GitHub (issues, PRs, repositories, notifications)
-- [ ] Sub-agent spawning (built-in runtime tool, one level deep)
-- [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides
-- [ ] Declarative skill capabilities (TOML manifests)
-- [ ] Action plan validation (separate from LLM)
-- [ ] Prompt injection detection — scan incoming messages for adversarial patterns before they reach the LLM
-- [ ] Credential management (env vars, `.env` fallback, per-skill OAuth storage)
-- [ ] Agent-generated skills: template-based REST API skills (no code execution)
-- [ ] Bundled REST API skills: JIRA, Front (shipped templates using the REST skill system)
-- [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
-- [ ] Cost estimation and per-JID quota (token tracking, usage limits, `/usage` command)
-- [ ] Persona packages (bundled identity/personality/instructions, `/persona` commands)
-- [ ] LLM prompt caching (`cache_control` markers for system prompt and history prefix)
-- [ ] Context window management (token-budget history, compaction, memory flush)
+- [x] Session file structure migration (markdown → JSONL with structured metadata)
+- [x] Session timeout with lazy auto-archival of idle sessions
+- [x] File attachments — receive images/documents via OOB (XEP-0066), download, pass to LLM
+- [x] Connection keepalive (whitespace pings, read timeout detection)
+- [x] Temporal awareness — current date in system prompt
+- [x] Release build chain as GitHub Action
 
 ### Persona packages
 
@@ -1092,20 +1081,34 @@ host = "http://localhost:11434"   # optional, this is the default
 
 ---
 
-## v0.3 — Proactivity
+## v0.3 — Proactivity & Resilience
 
-The agent initiates, not just responds.
+The agent initiates, not just responds. The runtime becomes more robust.
 
+- [ ] LLM API error handling (retry with backoff, fallback models, graceful degradation)
+- [ ] LLM prompt caching (`cache_control` markers for system prompt and history prefix)
+- [ ] Context window management (token-budget history, compaction, memory flush)
+- [ ] Builtin skill: GitHub (issues, PRs, repositories, notifications)
+- [ ] Sub-agent spawning (built-in runtime tool, one level deep)
+- [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides
+- [ ] Prompt injection detection — scan incoming messages for adversarial patterns before they reach the LLM
+- [ ] Credential management (env vars, `.env` fallback, per-skill OAuth storage)
+- [ ] Cost estimation and per-JID quota (token tracking, usage limits, `/usage` command)
+- [ ] Persona packages (bundled identity/personality/instructions, `/persona` commands)
 - [ ] Advanced MUC — room-specific system prompts, invite handling, activation modes (mention vs. all)
+- [ ] MCP bridge — leverage existing MCP servers as skills
 - [ ] React to user presence changes (e.g., greet on login, trigger deferred tasks when user comes online)
 - [ ] React to user PEP events (XEP-0163) — mood, activity, tune, location, avatar changes
 - [ ] Cron-based scheduled tasks (via PubSub or internal scheduler)
-- [ ] Heartbeat / keepalive for long-lived connections
 - [ ] Webhook ingestion — external events trigger agent actions
 - [ ] PubSub subscription — agent reacts to XMPP PubSub events
 - [ ] Mastodon integration — skill + inbound event channel via ActivityPub
-- [ ] MCP bridge — leverage existing MCP servers as skills
 - [ ] Agent-generated skills: supervised proposals (LLM drafts, human approves)
+- [ ] Declarative skill capabilities (TOML manifests)
+- [ ] Action plan validation (separate from LLM)
+- [ ] Agent-generated skills: template-based REST API skills (no code execution)
+- [ ] Bundled REST API skills: JIRA, Front (shipped templates using the REST skill system)
+- [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
 - [ ] XMPP Stream Management (XEP-0198) — message acknowledgment, session resumption, reliability for unstable networks
 
 ### Presence-based proactivity
