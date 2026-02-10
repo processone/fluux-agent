@@ -50,7 +50,14 @@ Fluux Agent connects modern AI agents to this proven messaging backbone.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│    Fluux     │ │ Conversations│ │    Dino,     │
+│  Messenger   │ │              │ │  Movim, ...  │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │ C2S
+┌───────────────────────▼─────────────────────────────┐
 │                   XMPP Server                       │
 │         (ejabberd, Prosody, Openfire...)            │
 │                                                     │
@@ -84,32 +91,37 @@ fluux-agent/
 ├── src/
 │   ├── main.rs                 # Entry point, config loading
 │   ├── config.rs               # TOML deserialization + ConnectionMode enum
+│   ├── backoff.rs              # Exponential backoff for reconnection
 │   ├── xmpp/
 │   │   ├── mod.rs              # Connection factory (dispatches component/client)
 │   │   ├── component.rs        # XEP-0114 connection, SHA-1 handshake
 │   │   ├── client.rs           # C2S connection (STARTTLS + SASL + bind)
 │   │   ├── sasl.rs             # SASL PLAIN + SCRAM-SHA-1 (RFC 5802)
-│   │   └── stanzas.rs          # Stanza parsing/construction
+│   │   └── stanzas.rs          # Stanza parsing/construction (quick-xml)
 │   ├── agent/
 │   │   ├── mod.rs
-│   │   ├── runtime.rs          # Main agentic loop
-│   │   └── memory.rs           # Conversational memory (markdown files)
+│   │   ├── runtime.rs          # Main agentic loop + slash commands
+│   │   ├── memory.rs           # Conversational memory (JSONL sessions)
+│   │   └── files.rs            # File download and attachment handling
 │   ├── llm/
 │   │   ├── mod.rs
 │   │   ├── client.rs           # LlmClient trait (provider abstraction)
 │   │   ├── anthropic.rs        # Anthropic Claude API client
 │   │   └── ollama.rs           # Ollama local model client
 │   ├── skills/
-│   │   ├── mod.rs
+│   │   ├── mod.rs              # Skill trait definition
 │   │   ├── registry.rs         # Skill discovery and loading
 │   │   └── builtin/
 │   │       ├── mod.rs
-│   │       └── web_search/     # Web search skill (Tavily + Perplexity)
+│   │       ├── web_search/     # Web search skill (Tavily + Perplexity)
+│   │       ├── memory.rs       # Knowledge store / recall skills
+│   │       └── url_fetch.rs    # URL content extraction skill
 │   └── sandbox/
 │       └── mod.rs              # Stub for v0.4 (Wasm + Landlock)
 ├── data/memory/                # Agent memory (workspace files + per-JID dirs)
 ├── config/
 │   └── agent.example.toml
+├── docs/                       # Design documents (skills, sessions, security...)
 ├── Cargo.toml
 ├── LICENSE                     # Apache 2.0
 └── README.md
