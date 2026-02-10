@@ -14,7 +14,6 @@ This is the beginning. The runtime you see here (XMPP connectivity, conversation
 
 ## Table of Contents
 
-- [Screenshots](#screenshots)
 - [Why](#why)
 - [Architecture](#architecture)
 - [Roadmap](#roadmap)
@@ -30,10 +29,10 @@ This is the beginning. The runtime you see here (XMPP connectivity, conversation
 
 *Click on any screenshot to view full size*
 
-| Fluux Agent in CLI | Connect with Fluux Messenger |
+| Fluux Agent demo in [Fluux Manager](https://github.com/processone/fluux-messenger) | CLI View |
 |--------------------|------------------------------|
-| <a href="assets/readme/cli-agent.png"><img src="assets/readme/cli-agent.png" width="250" style="border-radius: 8px;" alt="CLI Agent"/></a> | <a href="assets/readme/connect-fluux-messenger.png"><img src="assets/readme/connect-fluux-messenger.png" width="250" style="border-radius: 8px;" alt="Connect with Fluux Messenger (or any XMPP client)"/></a> |
-| *Clean and minimal CLI agent* | Connect with [Fluux Messenger](https://github.com/processone/fluux-messenger) (or any XMPP client) |
+| <a href="assets/readme/connect-fluux-messenger.png"><img src="assets/readme/connect-fluux-messenger.png" width="250" style="border-radius: 8px;" alt="Connect with Fluux Messenger (or any XMPP client)"/></a> | <a href="assets/readme/cli-agent.png"><img src="assets/readme/cli-agent.png" width="250" style="border-radius: 8px;" alt="CLI Agent"/></a> |
+| Connect with any XMPP client and start chatting! | *Manage it right from your CLI* | 
 
 </div>
 
