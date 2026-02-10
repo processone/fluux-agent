@@ -34,10 +34,23 @@ Implemented: the agent supports discrete sessions per user.
 - **Memory layout** — `{jid}/history.jsonl` (current session, JSONL format), `{jid}/sessions/*.jsonl` (archived), `{jid}/user.md` (user profile), `{jid}/memory.md` (long-term notes).
 - **`/status`** — Reports message count in current session and number of archived sessions.
 
+#### Session timeout ✓
+
+Implemented: idle sessions are automatically archived when the next message arrives.
+
+- **Lazy evaluation** — No background timer. When a message arrives, the runtime checks the session file's modification time. If idle longer than `idle_timeout_mins`, the session is archived (same as `/new`) before processing the new message.
+- **Configurable** — `[session]` TOML section with `idle_timeout_mins` (default: 0 = disabled). Per-user and per-room (MUC sessions have their own timeout check).
+- **All handlers** — Freshness check runs in `handle_message`, `handle_muc_message`, `handle_reaction`, and `handle_message_with_attachments`.
+- **`/status`** — Shows session timeout configuration.
+
+```toml
+[session]
+idle_timeout_mins = 240   # Archive after 4 hours of inactivity (0 = disabled)
+```
+
 #### Future enhancements (not yet implemented)
 
 - **XMPP thread ID mapping** — When the XMPP client sends a `<thread>` element (XEP-0201), the agent maps it to a session. Different thread IDs = different sessions. Messages without a thread ID use the "default" session.
-- **Session timeout** — If no message is received for a configurable duration (e.g. 4 hours), the next message implicitly starts a new session. The timeout is per-user.
 - **Session context carry-over** — When a new session starts, the agent can optionally summarize the previous session into `context.md`, giving continuity without sending the full old history to the LLM.
 
 ### Presence subscription for allowed JIDs ✓

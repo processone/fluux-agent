@@ -648,6 +648,15 @@ impl AgentRuntime {
             "Keepalive: disabled".to_string()
         };
 
+        let session_timeout_info = if self.config.session.idle_timeout_mins > 0 {
+            format!(
+                "Session timeout: {}m idle",
+                self.config.session.idle_timeout_mins,
+            )
+        } else {
+            "Session timeout: disabled".to_string()
+        };
+
         Ok(format!(
             "{} — status\n\
              Uptime: {hours}h {minutes}m\n\
@@ -655,6 +664,7 @@ impl AgentRuntime {
              LLM: {}\n\
              {skills_info}\n\
              {keepalive_info}\n\
+             {session_timeout_info}\n\
              {context_info}\n\
              Workspace: instructions={}, identity={}, personality={}\n\
              {domain_info}",
@@ -704,6 +714,9 @@ Commands:\n\
         // Bare JID for memory (without resource)
         let bare_jid = stanzas::bare_jid(from);
 
+        // Auto-archive stale sessions before loading history
+        self.memory.check_session_freshness(bare_jid, self.config.session.idle_timeout_mins)?;
+
         // Retrieve conversation history and workspace context
         let history = self.memory.get_history(bare_jid, MAX_HISTORY)?;
         let workspace = self.memory.get_workspace_context(bare_jid)?;
@@ -745,6 +758,9 @@ Commands:\n\
     /// The LLM decides whether a response is warranted based on the full context.
     /// Returns the LLM response text (caller stores and sends it).
     async fn handle_reaction(&self, jid: &str) -> Result<String> {
+        // Auto-archive stale sessions before loading history
+        self.memory.check_session_freshness(jid, self.config.session.idle_timeout_mins)?;
+
         let history = self.memory.get_history(jid, MAX_HISTORY)?;
         let workspace = self.memory.get_workspace_context(jid)?;
         let system_prompt = self.build_system_prompt(&workspace);
@@ -768,6 +784,9 @@ Commands:\n\
     /// The user message is already stored in history by the caller.
     /// Returns the LLM response text (caller stores the assistant message).
     async fn handle_muc_message(&self, room_jid: &str, _body: &str) -> Result<String> {
+        // Auto-archive stale sessions before loading history
+        self.memory.check_session_freshness(room_jid, self.config.session.idle_timeout_mins)?;
+
         // Retrieve conversation history and workspace context
         let history = self.memory.get_history(room_jid, MAX_HISTORY)?;
         let workspace = self.memory.get_workspace_context(room_jid)?;
@@ -1020,6 +1039,9 @@ async fn handle_message_with_attachments(
         });
     }
 
+    // Auto-archive stale sessions before loading history
+    memory.check_session_freshness(bare_jid, config.session.idle_timeout_mins)?;
+
     // Build the multi-modal message with structured JSON metadata block
     let history = memory.get_history(bare_jid, MAX_HISTORY)?;
     let workspace = memory.get_workspace_context(bare_jid)?;
@@ -1201,6 +1223,7 @@ mod tests {
             rooms: vec![],
             skills: SkillsConfig::default(),
             keepalive: crate::config::KeepaliveConfig::default(),
+            session: crate::config::SessionConfig::default(),
         };
 
         let llm: Arc<dyn LlmClient> = Arc::new(AnthropicClient::new(config.llm.clone()));
@@ -1545,6 +1568,16 @@ mod tests {
         assert!(result.contains("User memory: none"));
         assert!(result.contains("instructions=none"));
         assert!(result.contains("Allowed domains: localhost (default)"));
+        assert!(result.contains("Session timeout: disabled"));
+    }
+
+    #[test]
+    fn test_command_status_session_timeout_enabled() {
+        let (mut rt, _tmp) = test_runtime();
+        rt.config.session.idle_timeout_mins = 120;
+
+        let result = rt.handle_command("admin@localhost", "/status").unwrap();
+        assert!(result.contains("Session timeout: 120m idle"));
     }
 
     #[test]

@@ -8,12 +8,16 @@ Fluux Agent implements the following XMPP standards:
 
 Core XMPP protocol — XML streams, stanza routing, error handling.
 
-**Implementation:** Stream establishment, stanza parsing (quick-xml event-based `StanzaParser`), error condition handling (§4.9.3).
+**Implementation:** Stream establishment, stanza parsing (quick-xml event-based `StanzaParser`), error condition handling (§4.9.3), whitespace keepalive (§4.6.1).
+
+**Whitespace keepalive (§4.6.1):** The agent sends periodic whitespace pings (single space byte) to detect dead TCP connections — e.g., after machine sleep/wake. A configurable read timeout triggers a connection probe; if the write fails, the agent declares the connection lost and the reconnection loop takes over. This is non-destructive: a timeout alone does not disconnect — only a failed write does.
 
 **References:**
 - `src/xmpp/stanzas.rs:724` — stream error conditions (25 RFC 6120 conditions)
 - `src/xmpp/stanzas.rs:446` — `StanzaParser` (event-based XML stream parser)
-- `src/xmpp/component.rs` — stream management
+- `src/xmpp/component.rs` — stream management, keepalive ping handling, read timeout
+- `src/agent/runtime.rs:70` — ping interval timer and read timeout probe logic
+- `src/config.rs` — `KeepaliveConfig` (enabled, ping_interval_secs, read_timeout_secs)
 
 ---
 
@@ -215,7 +219,7 @@ See `docs/DEVELOPING.md` for rationale.
 ## Version History
 
 - **v0.1** — XEP-0114 (component mode), XEP-0085 (chat states), XEP-0045 (MUC), XEP-0066 (OOB file attachments)
-- **v0.2** — XEP-0444 inbound reactions, message ID embedding, C2S client mode (RFC 4616 PLAIN, RFC 5802 SCRAM-SHA-1, STARTTLS), JSONL session format
+- **v0.2** — XEP-0444 inbound reactions, message ID embedding, C2S client mode (RFC 4616 PLAIN, RFC 5802 SCRAM-SHA-1, STARTTLS), JSONL session format, RFC 6120 §4.6.1 whitespace keepalive
 
 ---
 
