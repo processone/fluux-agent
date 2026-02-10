@@ -429,6 +429,44 @@ impl Memory {
         ))
     }
 
+    /// Checks whether the current session is still fresh, based on the file's
+    /// modification time and the configured idle timeout.
+    ///
+    /// If the session has been idle for longer than `idle_timeout_mins`, it is
+    /// automatically archived (same as `/new`) and `Ok(true)` is returned to
+    /// indicate that a stale session was rotated.
+    ///
+    /// Returns `Ok(false)` if the session is still fresh or if there is no
+    /// active session. A timeout of 0 disables the check entirely.
+    pub fn check_session_freshness(&self, jid: &str, idle_timeout_mins: u64) -> Result<bool> {
+        if idle_timeout_mins == 0 {
+            return Ok(false);
+        }
+
+        let user_dir = self.base_path.join(jid);
+        let history_path = user_dir.join("history.jsonl");
+
+        if !history_path.exists() {
+            return Ok(false);
+        }
+
+        let metadata = fs::metadata(&history_path)?;
+        let modified = metadata.modified()?;
+        let elapsed = modified.elapsed().unwrap_or_default();
+        let timeout = std::time::Duration::from_secs(idle_timeout_mins * 60);
+
+        if elapsed > timeout {
+            info!(
+                "Session for {jid} idle for {}m (timeout: {idle_timeout_mins}m) — auto-archiving",
+                elapsed.as_secs() / 60
+            );
+            self.new_session(jid)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Erases all active memory for a user (history + user profile + memory).
     /// Archived sessions are preserved.
     pub fn forget(&self, jid: &str) -> Result<String> {
@@ -2329,5 +2367,144 @@ not valid json
 
         let result = memory.knowledge_search(jid, "anything").unwrap();
         assert!(result.contains("No knowledge entries stored yet"));
+    }
+
+    // ── Session freshness tests ─────────────────────────────
+
+    #[test]
+    fn test_check_freshness_disabled_when_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        memory.store_message("user@test", "user", "Hello").unwrap();
+
+        // Timeout of 0 means disabled — never archives
+        let rotated = memory.check_session_freshness("user@test", 0).unwrap();
+        assert!(!rotated);
+
+        // Session still intact
+        assert_eq!(memory.message_count("user@test").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_check_freshness_no_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        // No history file at all — should return false (no rotation)
+        let rotated = memory.check_session_freshness("user@test", 60).unwrap();
+        assert!(!rotated);
+    }
+
+    #[test]
+    fn test_check_freshness_fresh_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        memory.store_message("user@test", "user", "Hello").unwrap();
+
+        // Just created — should be fresh with a 60-minute timeout
+        let rotated = memory.check_session_freshness("user@test", 60).unwrap();
+        assert!(!rotated);
+
+        // Session still intact
+        assert_eq!(memory.message_count("user@test").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_check_freshness_stale_session_archives() {
+        use filetime::FileTime;
+
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        memory.store_message("user@test", "user", "Hello").unwrap();
+        memory.store_message("user@test", "assistant", "Hi!").unwrap();
+
+        // Backdate the file's mtime by 2 hours
+        let history_path = dir.path().join("user@test/history.jsonl");
+        let two_hours_ago = FileTime::from_unix_time(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                - 7200,
+            0,
+        );
+        filetime::set_file_mtime(&history_path, two_hours_ago).unwrap();
+
+        // With a 60-minute timeout, the session should be stale
+        let rotated = memory.check_session_freshness("user@test", 60).unwrap();
+        assert!(rotated);
+
+        // History should be empty (archived)
+        assert_eq!(memory.message_count("user@test").unwrap(), 0);
+
+        // Archived session should exist
+        assert_eq!(memory.session_count("user@test").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_check_freshness_not_stale_within_timeout() {
+        use filetime::FileTime;
+
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        memory.store_message("user@test", "user", "Hello").unwrap();
+
+        // Backdate by 30 minutes
+        let history_path = dir.path().join("user@test/history.jsonl");
+        let thirty_mins_ago = FileTime::from_unix_time(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                - 1800,
+            0,
+        );
+        filetime::set_file_mtime(&history_path, thirty_mins_ago).unwrap();
+
+        // With a 60-minute timeout, 30 minutes of idle is still fresh
+        let rotated = memory.check_session_freshness("user@test", 60).unwrap();
+        assert!(!rotated);
+
+        // Session still intact
+        assert_eq!(memory.message_count("user@test").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_check_freshness_new_session_works_after_archive() {
+        use filetime::FileTime;
+
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::open(dir.path()).unwrap();
+
+        memory.store_message("user@test", "user", "Old message").unwrap();
+
+        // Backdate the file
+        let history_path = dir.path().join("user@test/history.jsonl");
+        let two_hours_ago = FileTime::from_unix_time(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                - 7200,
+            0,
+        );
+        filetime::set_file_mtime(&history_path, two_hours_ago).unwrap();
+
+        // Auto-archive
+        memory.check_session_freshness("user@test", 60).unwrap();
+
+        // Now store a new message — should start a fresh session
+        memory.store_message("user@test", "user", "New message").unwrap();
+
+        let history = memory.get_history("user@test", 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(text(&history[0].content), "New message");
+
+        // One archived session
+        assert_eq!(memory.session_count("user@test").unwrap(), 1);
     }
 }

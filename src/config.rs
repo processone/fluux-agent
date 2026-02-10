@@ -17,6 +17,10 @@ pub struct Config {
     /// Enabled by default with sensible defaults.
     #[serde(default)]
     pub keepalive: KeepaliveConfig,
+    /// Session timeout configuration.
+    /// When enabled, idle sessions are automatically archived on next message.
+    #[serde(default)]
+    pub session: SessionConfig,
 }
 
 /// Configuration for a MUC room (XEP-0045)
@@ -185,6 +189,28 @@ impl Default for KeepaliveConfig {
     }
 }
 
+/// Session timeout configuration.
+///
+/// When enabled, sessions that have been idle for longer than
+/// `idle_timeout_mins` are automatically archived when the next
+/// message arrives (lazy evaluation — no background timer).
+#[derive(Debug, Deserialize, Clone)]
+pub struct SessionConfig {
+    /// Idle timeout in minutes. If the session has been idle for longer
+    /// than this, it is archived on the next inbound message.
+    /// Default: 0 (disabled).
+    #[serde(default)]
+    pub idle_timeout_mins: u64,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_mins: 0,
+        }
+    }
+}
+
 /// Configuration for the `web_search` builtin skill.
 #[derive(Debug, Deserialize, Clone)]
 pub struct WebSearchConfig {
@@ -338,6 +364,7 @@ mod tests {
             rooms: vec![],
             skills: SkillsConfig::default(),
             keepalive: KeepaliveConfig::default(),
+            session: SessionConfig::default(),
         }
     }
 
@@ -569,5 +596,28 @@ mod tests {
         assert!(ka.enabled);
         assert_eq!(ka.ping_interval_secs, 30);
         assert_eq!(ka.read_timeout_secs, 120);
+    }
+
+    // ── SessionConfig tests ─────────────────────────────
+
+    #[test]
+    fn test_session_defaults() {
+        let sc = SessionConfig::default();
+        assert_eq!(sc.idle_timeout_mins, 0);
+    }
+
+    #[test]
+    fn test_session_default_when_absent() {
+        let config = config_with_jids(vec![]);
+        assert_eq!(config.session.idle_timeout_mins, 0);
+    }
+
+    #[test]
+    fn test_session_custom_timeout_toml() {
+        let toml = r#"
+            idle_timeout_mins = 120
+        "#;
+        let sc: SessionConfig = toml::from_str(toml).unwrap();
+        assert_eq!(sc.idle_timeout_mins, 120);
     }
 }

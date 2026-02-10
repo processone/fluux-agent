@@ -290,6 +290,9 @@ allowed_jids = ["admin@localhost"]
 [memory]
 backend = "markdown"
 path = "./data/memory"
+
+[session]
+idle_timeout_mins = 240   # Auto-archive after 4 hours of inactivity (0 = disabled)
 ```
 
 Memory is stored as human-readable markdown files, workspace files for global agent configuration and per-JID directories for isolated user data. This makes agent memory inspectable, editable, and git-friendly. Admins can customize agent behavior by creating `instructions.md`, `identity.md`, and `personality.md` in the memory root directory.
@@ -313,6 +316,7 @@ Each user has a current conversation session (`history.jsonl`) and optionally ar
 - **`/new`** archives the current session to `sessions/{YYYYMMDD-HHMMSS}.jsonl` and clears the LLM context.
 - **`/forget`** erases the current history, user profile (`user.md`), and memory (`memory.md`) but preserves archived sessions.
 - **`/status`** shows the number of messages in the current session and how many sessions have been archived.
+- **Session timeout** — idle sessions are automatically archived when the next message arrives after a configurable inactivity period. This is lazy (no background timer) and works per-user and per-room.
 
 Memory layout:
 
