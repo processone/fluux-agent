@@ -1,6 +1,6 @@
 # Fluux Agent
 
-A framework for open and federated AI agent networks built on XMPP, with security as a first-class concern.
+A runtime for open and federated AI agent networks built on XMPP, with security and reliability as a first-class concern.
 
 [![Release](https://img.shields.io/github/v/release/processone/fluux-agent)](https://github.com/processone/fluux-agent/releases)
 [![Downloads](https://img.shields.io/github/downloads/processone/fluux-agent/total)](https://github.com/processone/fluux-agent/releases)
@@ -14,6 +14,7 @@ This is the beginning. The runtime you see here (XMPP connectivity, conversation
 
 ## Table of Contents
 
+- [Screenshots](#screenshots)
 - [Why](#why)
 - [Architecture](#architecture)
 - [Roadmap](#roadmap)
@@ -29,10 +30,10 @@ This is the beginning. The runtime you see here (XMPP connectivity, conversation
 
 *Click on any screenshot to view full size*
 
-| Fluux Agent demo in [Fluux Manager](https://github.com/processone/fluux-messenger) | CLI View |
-|--------------------|------------------------------|
+| Fluux Agent demo in [Fluux Messenger](https://github.com/processone/fluux-messenger)                                                                                                                           | CLI View                                                                                                                                   |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|
 | <a href="assets/readme/connect-fluux-messenger.png"><img src="assets/readme/connect-fluux-messenger.png" width="250" style="border-radius: 8px;" alt="Connect with Fluux Messenger (or any XMPP client)"/></a> | <a href="assets/readme/cli-agent.png"><img src="assets/readme/cli-agent.png" width="250" style="border-radius: 8px;" alt="CLI Agent"/></a> |
-| Connect with any XMPP client and start chatting! | *Manage it right from your CLI* | 
+| Connect with any XMPP client and start chatting!                                                                                                                                                               | *Manage it right from your CLI*                                                                                                            | 
 
 </div>
 
@@ -165,14 +166,14 @@ Fluux Agent starts as a personal assistant, but it is built from day one to evol
 
 ### Short term
 
-| Phase    | Description                                                                                                                        | Status         |
-|----------|------------------------------------------------------------------------------------------------------------------------------------|----------------|
-| **v0.1** | XMPP component + C2S client + agentic loop + Claude API + JSONL memory + sessions + slash commands + MUC rooms                     | Tagged         |
-| **v0.2** | Skills system (web search), LlmClient trait, Ollama support, model tiering, proactive context learning, prompt injection detection | In progress    |
-| **v0.3** | Proactivity (cron via PubSub, heartbeat), advanced MUC (room-specific prompts, invite handling)                                    | Planned        |
-| **v0.4** | Wasm sandbox (wasmtime) + Landlock                                                                                                 | Planned        |
-| **v0.5** | Agent protocol (`urn:fluux:agent:0`): discovery, execute, confirm                                                                | Planned        |
-| **v1.0** | Agent-to-agent federation, complete documentation                                                                                  | Planned        |
+| Phase    | Description                                                                                                                        | Status      |
+|----------|------------------------------------------------------------------------------------------------------------------------------------|-------------|
+| **v0.1** | XMPP component + C2S client + agentic loop + Claude API + JSONL memory + sessions + slash commands + MUC rooms                     | Tagged      |
+| **v0.2** | Skills system (web search), LlmClient trait, Ollama support, model tiering, proactive context learning, prompt injection detection | In progress |
+| **v0.3** | Proactivity (cron via PubSub, heartbeat), advanced MUC (room-specific prompts, invite handling)                                    | Planned     |
+| **v0.4** | Wasm sandbox (wasmtime) + Landlock                                                                                                 | Planned     |
+| **v0.5** | Agent protocol (`urn:fluux:agent:0`): discovery, execute, confirm                                                                  | Planned     |
+| **v1.0** | Agent-to-agent federation, complete documentation                                                                                  | Planned     |
 
 ### Long term
 
