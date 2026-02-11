@@ -1,11 +1,18 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tokio::time::sleep;
+use tracing::{debug, info, warn};
 
+use crate::backoff::Backoff;
 use crate::config::LlmConfig;
 use super::client::LlmClient;
+
+/// Maximum number of retry attempts for transient API errors.
+const MAX_RETRY_ATTEMPTS: u32 = 5;
 
 /// Client for Anthropic Messages API
 #[derive(Clone)]
@@ -261,23 +268,59 @@ impl LlmClient for AnthropicClient {
             if tools.is_some() { " + tools" } else { "" }
         );
 
-        let response = self
-            .client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.config.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+        // Retry loop with exponential backoff for transient errors
+        let mut backoff = Backoff::new(
+            Duration::from_secs(1),  // initial delay
+            Duration::from_secs(30), // max delay
+            2,                       // multiplier
+        );
 
-        let status = response.status();
-        if !status.is_success() {
+        let resp: MessagesResponse = loop {
+            let response = self
+                .client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &self.config.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&request)
+                .send()
+                .await?;
+
+            let status = response.status();
+
+            if status.is_success() {
+                break response.json().await?;
+            }
+
+            // Check if this is a transient error that should be retried
+            let is_transient = matches!(
+                status.as_u16(),
+                429 | 500 | 502 | 503 | 504 | 529
+            );
+
             let body = response.text().await?;
-            anyhow::bail!("Claude API error ({status}): {body}");
-        }
 
-        let resp: MessagesResponse = response.json().await?;
+            if !is_transient || backoff.exceeded_max_attempts(MAX_RETRY_ATTEMPTS) {
+                if is_transient {
+                    anyhow::bail!(
+                        "Claude API error ({status}): {body} (gave up after {} retries)",
+                        backoff.attempt
+                    );
+                } else {
+                    anyhow::bail!("Claude API error ({status}): {body}");
+                }
+            }
+
+            // Transient error - retry with backoff
+            let delay = backoff.next_delay();
+            warn!(
+                "Claude API returned transient error ({status}), retrying in {:?} (attempt {}/{})",
+                delay,
+                backoff.attempt,
+                MAX_RETRY_ATTEMPTS
+            );
+            sleep(delay).await;
+        };
 
         // Parse response content blocks into text, tool calls, and
         // InputContentBlock copies for re-submission in the agentic loop.
