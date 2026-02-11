@@ -12,7 +12,8 @@ data/memory/
 ├── personality.md               # Global: tone, style, quirks
 ├── alice@example.com/           # Per-user directory (bare JID)
 │   ├── user.md                  # What the agent knows about this user
-│   ├── memory.md                # Long-term notes
+│   ├── memory.md                # Long-term notes (admin-managed)
+│   ├── knowledge.jsonl          # Structured knowledge store (agent-managed)
 │   ├── history.jsonl            # Current conversation session (JSONL)
 │   ├── files/                   # Downloaded attachments
 │   └── sessions/
@@ -20,6 +21,7 @@ data/memory/
 │       └── 20250602-091500.jsonl
 ├── bob@example.com/             # Another user (fully isolated)
 │   ├── user.md
+│   ├── knowledge.jsonl
 │   ├── history.jsonl
 │   └── sessions/
 ├── room@conference.example.com/ # MUC room (same structure as users)
@@ -27,7 +29,8 @@ data/memory/
 │   ├── identity.md              # Room-specific override (optional)
 │   ├── personality.md           # Room-specific override (optional)
 │   ├── user.md                  # Room-specific context ("about this room")
-│   ├── memory.md                # Room-specific notes
+│   ├── memory.md                # Room-specific notes (admin-managed)
+│   ├── knowledge.jsonl          # Room-specific knowledge (agent-managed)
 │   ├── history.jsonl
 │   └── sessions/
 ```
@@ -233,6 +236,23 @@ Example:
 - 2025-06-05: Prefers Rust over Go for systems programming
 ```
 
+### `knowledge.jsonl`
+
+Structured key/value knowledge store, managed by the agent via the `memory_store` and `memory_recall` skills. Unlike `memory.md` (which is admin-managed and injected into the system prompt), knowledge entries are stored on demand and recalled on demand through tool use.
+
+Each line is a JSON object with `key`, `content`, and `ts` fields:
+
+```json
+{"key":"favorite_language","content":"Rust, for systems programming","ts":"2025-06-01T14:30:22Z"}
+{"key":"project_deadline","content":"FOSDEM talk submission due 2025-09-15","ts":"2025-06-03T10:00:00Z"}
+```
+
+**Overwrite semantics:** storing the same key replaces the previous value. New keys are appended.
+
+**Search:** `memory_recall` does case-insensitive substring matching on both key and content. An empty query returns all entries.
+
+**Privacy:** knowledge is per-JID only. No cross-JID access. Erased by `/forget`.
+
 ### `history.jsonl`
 
 The current conversation session in JSONL format (one JSON object per line). The first line is a session header, followed by message entries:
@@ -259,11 +279,11 @@ Archived sessions created by the `/new` command. Each file is named with a times
 
 ## Slash commands that affect memory
 
-| Command | Effect |
-|---------|--------|
-| `/new` | Archives `history.jsonl` to `sessions/` and starts fresh |
-| `/forget` | Erases `history.jsonl`, `user.md`, and `memory.md` (archives preserved) |
-| `/status` | Shows session stats and which workspace files are loaded |
+| Command   | Effect                                                                  |
+|-----------|-------------------------------------------------------------------------|
+| `/new`    | Archives `history.jsonl` to `sessions/` and starts fresh                |
+| `/forget` | Erases `history.jsonl`, `user.md`, `memory.md`, and `knowledge.jsonl` (archives preserved) |
+| `/status` | Shows session stats and which workspace files are loaded                |
 
 ## Migration from legacy format
 
@@ -274,11 +294,11 @@ Archived sessions created by the `/new` command. Each file is named with a times
 
 The workspace structure is inspired by [OpenClaw](https://github.com/openclaw). Mapping:
 
-| OpenClaw | Fluux Agent | Notes |
-|----------|-------------|-------|
-| `AGENTS.md` | `instructions.md` | Agent behavior rules |
-| `SOUL.md` | `personality.md` | Tone and style |
-| `IDENTITY.md` | `identity.md` | Agent identity |
-| `USER.md` | `{jid}/user.md` | Per-user (isolated per JID) |
-| `MEMORY.md` | `{jid}/memory.md` | Per-user (isolated per JID) |
-| `TOOLS.md` | — | Not yet supported (see roadmap) |
+| OpenClaw      | Fluux Agent       | Notes                           |
+|---------------|-------------------|---------------------------------|
+| `AGENTS.md`   | `instructions.md` | Agent behavior rules            |
+| `SOUL.md`     | `personality.md`  | Tone and style                  |
+| `IDENTITY.md` | `identity.md`     | Agent identity                  |
+| `USER.md`     | `{jid}/user.md`   | Per-user (isolated per JID)     |
+| `MEMORY.md`   | `{jid}/memory.md` | Per-user (isolated per JID)     |
+| `TOOLS.md`    | —                 | Not yet supported (see roadmap) |
