@@ -1110,6 +1110,9 @@ The agent initiates, not just responds. The runtime becomes more robust.
 - [ ] Bundled REST API skills: JIRA, Front (shipped templates using the REST skill system)
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
 - [ ] XMPP Stream Management (XEP-0198) — message acknowledgment, session resumption, reliability for unstable networks
+- [ ] Language detection from stanza `xml:lang` attribute as hint for user's preferred language
+- [ ] Entity Capabilities (XEP-0115) in C2S connector — advertise agent capabilities via presence caps hash
+- [ ] Message Carbons (XEP-0280) — sync messages across multiple connected resources
 
 ### Presence-based proactivity
 
