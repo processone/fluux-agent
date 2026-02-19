@@ -127,6 +127,8 @@ fluux-agent/
 └── README.md
 ```
 
+For the planned actor-based orchestration model, see [Actor Runtime Design](docs/ACTOR_RUNTIME.md).
+
 ### Key Principles
 
 - **Open and federated**  
