@@ -59,7 +59,11 @@ impl XmppClient {
 
         // Spawn the event loop as a background task
         tokio::spawn(Self::run_event_loop(
-            reader, writer, event_tx, cmd_rx, read_timeout,
+            reader,
+            writer,
+            event_tx,
+            cmd_rx,
+            read_timeout,
         ));
 
         Ok((event_rx, cmd_tx))
@@ -84,12 +88,7 @@ impl XmppClient {
                 password,
                 resource,
                 tls_verify,
-            } => (
-                jid.clone(),
-                password.clone(),
-                resource.clone(),
-                *tls_verify,
-            ),
+            } => (jid.clone(), password.clone(), resource.clone(), *tls_verify),
             _ => {
                 return Err(XmppError::Config(
                     "XmppClient requires client mode config".into(),
@@ -137,9 +136,7 @@ impl XmppClient {
                 .await
                 .map_err(|e| XmppError::Transient(format!("STARTTLS response read: {e}")))?;
             if !stanzas::is_starttls_proceed(&response) {
-                return Err(XmppError::Transient(format!(
-                    "STARTTLS failed: {response}"
-                )));
+                return Err(XmppError::Transient(format!("STARTTLS failed: {response}")));
             }
             debug!("STARTTLS proceed received");
         } else {
@@ -301,9 +298,7 @@ impl XmppClient {
                         Ok(result) => result,
                         Err(_elapsed) => {
                             debug!("Read timeout — requesting connection probe");
-                            let _ = event_tx_clone
-                                .send(XmppEvent::ReadTimeout)
-                                .await;
+                            let _ = event_tx_clone.send(XmppEvent::ReadTimeout).await;
                             continue;
                         }
                     }
@@ -324,18 +319,14 @@ impl XmppClient {
                             match stanza {
                                 XmppStanza::Message(msg) => {
                                     debug!("Received message from {}: {}", msg.from, msg.body);
-                                    let _ = event_tx_clone
-                                        .send(XmppEvent::Message(msg))
-                                        .await;
+                                    let _ = event_tx_clone.send(XmppEvent::Message(msg)).await;
                                 }
                                 XmppStanza::Presence(pres) => {
                                     debug!(
                                         "Received presence from {}: {:?}",
                                         pres.from, pres.presence_type
                                     );
-                                    let _ = event_tx_clone
-                                        .send(XmppEvent::Presence(pres))
-                                        .await;
+                                    let _ = event_tx_clone.send(XmppEvent::Presence(pres)).await;
                                 }
                                 XmppStanza::Reaction(reaction) => {
                                     debug!(
@@ -344,9 +335,8 @@ impl XmppClient {
                                         reaction.emojis.join(""),
                                         reaction.message_id
                                     );
-                                    let _ = event_tx_clone
-                                        .send(XmppEvent::Reaction(reaction))
-                                        .await;
+                                    let _ =
+                                        event_tx_clone.send(XmppEvent::Reaction(reaction)).await;
                                 }
                                 XmppStanza::StreamError(condition) => {
                                     error!("Stream error received: {condition}");
@@ -397,9 +387,7 @@ impl XmppClient {
                         ChatState::Composing => {
                             stanzas::build_chat_state_composing(None, &to, &msg_type)
                         }
-                        ChatState::Paused => {
-                            stanzas::build_chat_state_paused(None, &to, &msg_type)
-                        }
+                        ChatState::Paused => stanzas::build_chat_state_paused(None, &to, &msg_type),
                     },
                     XmppCommand::SendMucMessage { to, body, id } => {
                         stanzas::build_muc_message(None, &to, &body, id.as_deref())

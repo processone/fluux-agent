@@ -1,3 +1,4 @@
+mod actors;
 mod agent;
 mod backoff;
 mod config;
@@ -13,9 +14,10 @@ use anyhow::{anyhow, Result};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::actors::supervisor::{ActorSupervisor, ActorSupervisorDependencies};
 use crate::agent::files::FileDownloader;
 use crate::agent::memory::Memory;
-use crate::agent::runtime::AgentRuntime;
+use crate::agent::runtime::build_actor_runtime_dependencies;
 use crate::backoff::Backoff;
 use crate::config::Config;
 use crate::llm::{AnthropicClient, LlmClient, OllamaClient};
@@ -119,10 +121,7 @@ async fn main() -> Result<()> {
     info!("Agent: {}", config.agent.name);
     info!("XMPP mode: {}", config.server.mode_description());
     info!("LLM: {} ({})", config.llm.provider, config.llm.model);
-    info!(
-        "Allowed JIDs: {}",
-        config.agent.allowed_jids.join(", ")
-    );
+    info!("Allowed JIDs: {}", config.agent.allowed_jids.join(", "));
     if config.agent.allowed_domains.is_empty() {
         info!(
             "Allowed domains: {} (default — own domain only)",
@@ -137,7 +136,12 @@ async fn main() -> Result<()> {
     if !config.rooms.is_empty() {
         info!(
             "MUC rooms: {}",
-            config.rooms.iter().map(|r| format!("{} (as {})", r.jid, r.nick)).collect::<Vec<_>>().join(", ")
+            config
+                .rooms
+                .iter()
+                .map(|r| format!("{} (as {})", r.jid, r.nick))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -152,7 +156,10 @@ async fn main() -> Result<()> {
             ));
         }
     };
-    let file_downloader = Arc::new(FileDownloader::with_tls_verify(3, config.server.tls_verify()));
+    let file_downloader = Arc::new(FileDownloader::with_tls_verify(
+        3,
+        config.server.tls_verify(),
+    ));
     let mut skills = SkillRegistry::new();
 
     // Register builtin skills based on config
@@ -183,19 +190,36 @@ async fn main() -> Result<()> {
     if config.keepalive.enabled {
         info!(
             "Keepalive: ping every {}s, read timeout {}s",
-            config.keepalive.ping_interval_secs,
-            config.keepalive.read_timeout_secs,
+            config.keepalive.ping_interval_secs, config.keepalive.read_timeout_secs,
         );
     } else {
         info!("Keepalive: disabled");
     }
-    let runtime = AgentRuntime::new(config.clone(), llm, memory, file_downloader, skills);
-
-    let mut backoff = Backoff::new(
-        Duration::from_secs(2),
-        Duration::from_secs(60),
-        2,
+    let runtime_dependencies =
+        build_actor_runtime_dependencies(config.clone(), llm, memory, file_downloader, skills);
+    let session_responder = Arc::clone(&runtime_dependencies.session_responder);
+    let message_responder: Arc<dyn crate::actors::message::MessageResponder> =
+        session_responder.clone();
+    let reaction_responder: Arc<dyn crate::actors::reaction::ReactionResponder> = session_responder;
+    let supervisor_dependencies = ActorSupervisorDependencies::new(
+        Arc::clone(&runtime_dependencies.config),
+        Arc::clone(&runtime_dependencies.memory_writer),
+        message_responder,
+        reaction_responder,
+        Arc::clone(&runtime_dependencies.dead_letter_service),
     );
+    let actor_supervisor = ActorSupervisor::new(
+        config.actors.clone(),
+        config.keepalive.clone(),
+        supervisor_dependencies,
+    );
+
+    if !config.actors.enabled {
+        warn!("Config key `actors.enabled=false` is ignored in phase E; actor runtime is always enabled");
+    }
+    info!("Runtime mode: actor topology (phase E default)");
+
+    let mut backoff = Backoff::new(Duration::from_secs(2), Duration::from_secs(60), 2);
 
     // ── Reconnection loop ──────────────────────────────────────────
     loop {
@@ -216,7 +240,7 @@ async fn main() -> Result<()> {
 
                 // Run the agent runtime until the connection drops
                 let disconnect_reason = tokio::select! {
-                    result = runtime.run(event_rx, cmd_tx) => {
+                    result = actor_supervisor.run(event_rx, cmd_tx) => {
                         match result {
                             Ok(reason) => reason,
                             Err(e) => {

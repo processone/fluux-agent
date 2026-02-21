@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
+use super::client::LlmClient;
 use crate::backoff::Backoff;
 use crate::config::LlmConfig;
-use super::client::LlmClient;
 
 /// Maximum number of retry attempts for transient API errors.
 const MAX_RETRY_ATTEMPTS: u32 = 5;
@@ -293,10 +293,7 @@ impl LlmClient for AnthropicClient {
             }
 
             // Check if this is a transient error that should be retried
-            let is_transient = matches!(
-                status.as_u16(),
-                429 | 500 | 502 | 503 | 504 | 529
-            );
+            let is_transient = matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 529);
 
             let body = response.text().await?;
 
@@ -315,9 +312,7 @@ impl LlmClient for AnthropicClient {
             let delay = backoff.next_delay();
             warn!(
                 "Claude API returned transient error ({status}), retrying in {:?} (attempt {}/{})",
-                delay,
-                backoff.attempt,
-                MAX_RETRY_ATTEMPTS
+                delay, backoff.attempt, MAX_RETRY_ATTEMPTS
             );
             sleep(delay).await;
         };
@@ -332,9 +327,7 @@ impl LlmClient for AnthropicClient {
             match block {
                 ResponseContentBlock::Text { text } => {
                     text_parts.push(text.clone());
-                    content_blocks.push(InputContentBlock::Text {
-                        text: text.clone(),
-                    });
+                    content_blocks.push(InputContentBlock::Text { text: text.clone() });
                 }
                 ResponseContentBlock::ToolUse { id, name, input } => {
                     tool_calls.push(ToolCall {

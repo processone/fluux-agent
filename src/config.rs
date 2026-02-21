@@ -21,6 +21,11 @@ pub struct Config {
     /// When enabled, idle sessions are automatically archived on next message.
     #[serde(default)]
     pub session: SessionConfig,
+    /// Actor runtime configuration.
+    /// Runtime actor options. Actor topology is always used at startup.
+    /// The `enabled` field is kept for backward-compatibility and ignored.
+    #[serde(default)]
+    pub actors: ActorsConfig,
 }
 
 /// Configuration for a MUC room (XEP-0045)
@@ -211,6 +216,255 @@ impl Default for SessionConfig {
     }
 }
 
+/// Actor runtime configuration.
+///
+/// This is intentionally disabled by default so existing deployments keep
+/// current runtime behavior until actor mode is explicitly enabled.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ActorsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_router_mailbox")]
+    pub router_mailbox: usize,
+    #[serde(default = "default_session_mailbox")]
+    pub session_mailbox: usize,
+    #[serde(default = "default_max_active_sessions")]
+    pub max_active_sessions: usize,
+    #[serde(default = "default_session_idle_ttl_secs")]
+    pub session_idle_ttl_secs: u64,
+    #[serde(default = "default_busy_retry_after_secs")]
+    pub busy_retry_after_secs: u64,
+    #[serde(default = "default_dedupe_ttl_secs")]
+    pub dedupe_ttl_secs: u64,
+    #[serde(default = "default_dead_letter_path")]
+    pub dead_letter_path: PathBuf,
+    #[serde(default)]
+    pub tooling: ActorToolingConfig,
+    #[serde(default)]
+    pub supervision: ActorSupervisionConfig,
+    #[serde(default)]
+    pub memory: ActorMemoryConfig,
+    #[serde(default)]
+    pub observability: ActorObservabilityConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ActorToolingConfig {
+    #[serde(default = "default_max_tool_rounds")]
+    pub max_tool_rounds: usize,
+    #[serde(default = "default_skill_timeout_secs")]
+    pub skill_timeout_secs: u64,
+    #[serde(default = "default_max_parallel_skills")]
+    pub max_parallel_skills: usize,
+    #[serde(default = "default_skill_queue_timeout_ms")]
+    pub skill_queue_timeout_ms: u64,
+    #[serde(default = "default_allowed_capabilities")]
+    pub allowed_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ActorSupervisionConfig {
+    #[serde(default = "default_restart_backoff_min_ms")]
+    pub restart_backoff_min_ms: u64,
+    #[serde(default = "default_restart_backoff_max_ms")]
+    pub restart_backoff_max_ms: u64,
+    #[serde(default = "default_max_restarts_per_minute")]
+    pub max_restarts_per_minute: u64,
+    #[serde(default = "default_egress_send_timeout_ms")]
+    pub egress_send_timeout_ms: u64,
+    #[serde(default = "default_egress_retry_backoff_ms")]
+    pub egress_retry_backoff_ms: u64,
+    #[serde(default = "default_egress_max_retries")]
+    pub egress_max_retries: usize,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ActorMemoryConfig {
+    #[serde(default = "default_memory_enqueue_timeout_ms")]
+    pub enqueue_timeout_ms: u64,
+    #[serde(default = "default_memory_writer_shards")]
+    pub writer_shards: usize,
+    #[serde(default = "default_memory_write_batch_max")]
+    pub write_batch_max: usize,
+    #[serde(default = "default_memory_write_batch_max_delay_ms")]
+    pub write_batch_max_delay_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ActorObservabilityConfig {
+    #[serde(default = "default_actor_metrics_enabled")]
+    pub metrics_enabled: bool,
+    #[serde(default = "default_queue_depth_export_interval_secs")]
+    pub queue_depth_export_interval_secs: u64,
+    #[serde(default = "default_slow_actor_warn_ms")]
+    pub slow_actor_warn_ms: u64,
+}
+
+impl Default for ActorsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            router_mailbox: default_router_mailbox(),
+            session_mailbox: default_session_mailbox(),
+            max_active_sessions: default_max_active_sessions(),
+            session_idle_ttl_secs: default_session_idle_ttl_secs(),
+            busy_retry_after_secs: default_busy_retry_after_secs(),
+            dedupe_ttl_secs: default_dedupe_ttl_secs(),
+            dead_letter_path: default_dead_letter_path(),
+            tooling: ActorToolingConfig::default(),
+            supervision: ActorSupervisionConfig::default(),
+            memory: ActorMemoryConfig::default(),
+            observability: ActorObservabilityConfig::default(),
+        }
+    }
+}
+
+impl Default for ActorToolingConfig {
+    fn default() -> Self {
+        Self {
+            max_tool_rounds: default_max_tool_rounds(),
+            skill_timeout_secs: default_skill_timeout_secs(),
+            max_parallel_skills: default_max_parallel_skills(),
+            skill_queue_timeout_ms: default_skill_queue_timeout_ms(),
+            allowed_capabilities: default_allowed_capabilities(),
+        }
+    }
+}
+
+impl Default for ActorSupervisionConfig {
+    fn default() -> Self {
+        Self {
+            restart_backoff_min_ms: default_restart_backoff_min_ms(),
+            restart_backoff_max_ms: default_restart_backoff_max_ms(),
+            max_restarts_per_minute: default_max_restarts_per_minute(),
+            egress_send_timeout_ms: default_egress_send_timeout_ms(),
+            egress_retry_backoff_ms: default_egress_retry_backoff_ms(),
+            egress_max_retries: default_egress_max_retries(),
+        }
+    }
+}
+
+impl Default for ActorMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enqueue_timeout_ms: default_memory_enqueue_timeout_ms(),
+            writer_shards: default_memory_writer_shards(),
+            write_batch_max: default_memory_write_batch_max(),
+            write_batch_max_delay_ms: default_memory_write_batch_max_delay_ms(),
+        }
+    }
+}
+
+impl Default for ActorObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            metrics_enabled: default_actor_metrics_enabled(),
+            queue_depth_export_interval_secs: default_queue_depth_export_interval_secs(),
+            slow_actor_warn_ms: default_slow_actor_warn_ms(),
+        }
+    }
+}
+
+fn default_router_mailbox() -> usize {
+    1024
+}
+
+fn default_session_mailbox() -> usize {
+    256
+}
+
+fn default_max_active_sessions() -> usize {
+    2000
+}
+
+fn default_session_idle_ttl_secs() -> u64 {
+    1800
+}
+
+fn default_busy_retry_after_secs() -> u64 {
+    5
+}
+
+fn default_dedupe_ttl_secs() -> u64 {
+    600
+}
+
+fn default_dead_letter_path() -> PathBuf {
+    PathBuf::from("data/dead_letters.jsonl")
+}
+
+fn default_max_tool_rounds() -> usize {
+    10
+}
+
+fn default_skill_timeout_secs() -> u64 {
+    30
+}
+
+fn default_max_parallel_skills() -> usize {
+    32
+}
+
+fn default_skill_queue_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_allowed_capabilities() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+fn default_restart_backoff_min_ms() -> u64 {
+    200
+}
+
+fn default_restart_backoff_max_ms() -> u64 {
+    10_000
+}
+
+fn default_max_restarts_per_minute() -> u64 {
+    60
+}
+
+fn default_egress_send_timeout_ms() -> u64 {
+    200
+}
+
+fn default_egress_retry_backoff_ms() -> u64 {
+    50
+}
+
+fn default_egress_max_retries() -> usize {
+    3
+}
+
+fn default_memory_enqueue_timeout_ms() -> u64 {
+    200
+}
+
+fn default_memory_writer_shards() -> usize {
+    1
+}
+
+fn default_memory_write_batch_max() -> usize {
+    32
+}
+
+fn default_memory_write_batch_max_delay_ms() -> u64 {
+    20
+}
+
+fn default_actor_metrics_enabled() -> bool {
+    true
+}
+
+fn default_queue_depth_export_interval_secs() -> u64 {
+    5
+}
+
+fn default_slow_actor_warn_ms() -> u64 {
+    200
+}
+
 /// Configuration for the `web_search` builtin skill.
 #[derive(Debug, Deserialize, Clone)]
 pub struct WebSearchConfig {
@@ -247,7 +501,9 @@ impl ServerConfig {
     /// Human-readable description of the connection mode
     pub fn mode_description(&self) -> String {
         match &self.mode {
-            ConnectionMode::Component { component_domain, .. } => {
+            ConnectionMode::Component {
+                component_domain, ..
+            } => {
                 format!("component ({component_domain})")
             }
             ConnectionMode::Client { jid, .. } => {
@@ -276,9 +532,7 @@ impl ServerConfig {
             ConnectionMode::Component {
                 component_domain, ..
             } => component_domain.as_str(),
-            ConnectionMode::Client { jid, .. } => {
-                jid.split('@').nth(1).unwrap_or(jid.as_str())
-            }
+            ConnectionMode::Client { jid, .. } => jid.split('@').nth(1).unwrap_or(jid.as_str()),
         }
     }
 }
@@ -300,9 +554,10 @@ impl Config {
     /// Checks if a JID is allowed to talk to the agent
     pub fn is_allowed(&self, jid: &str) -> bool {
         let bare = crate::xmpp::stanzas::bare_jid(jid);
-        self.agent.allowed_jids.iter().any(|allowed| {
-            allowed == bare || allowed == "*"
-        })
+        self.agent
+            .allowed_jids
+            .iter()
+            .any(|allowed| allowed == bare || allowed == "*")
     }
 
     /// Checks if a JID's domain is allowed.
@@ -365,6 +620,7 @@ mod tests {
             skills: SkillsConfig::default(),
             keepalive: KeepaliveConfig::default(),
             session: SessionConfig::default(),
+            actors: ActorsConfig::default(),
         }
     }
 
@@ -439,10 +695,7 @@ mod tests {
                 component_secret: "secret".to_string(),
             },
         };
-        assert_eq!(
-            server.mode_description(),
-            "component (agent.localhost)"
-        );
+        assert_eq!(server.mode_description(), "component (agent.localhost)");
     }
 
     // ── find_room tests ──────────────────────────────────
@@ -468,7 +721,9 @@ mod tests {
     #[test]
     fn test_find_room_not_found() {
         let config = config_with_jids(vec![]);
-        assert!(config.find_room("nonexistent@conference.localhost").is_none());
+        assert!(config
+            .find_room("nonexistent@conference.localhost")
+            .is_none());
     }
 
     // ── domain() tests ──────────────────────────────────
@@ -520,10 +775,7 @@ mod tests {
     #[test]
     fn test_domain_explicit_list() {
         let mut config = config_with_jids(vec!["*"]);
-        config.agent.allowed_domains = vec![
-            "localhost".to_string(),
-            "partner.org".to_string(),
-        ];
+        config.agent.allowed_domains = vec!["localhost".to_string(), "partner.org".to_string()];
         assert!(config.is_domain_allowed("alice@localhost"));
         assert!(config.is_domain_allowed("bob@partner.org/phone"));
         assert!(!config.is_domain_allowed("hacker@evil.com"));
@@ -619,5 +871,54 @@ mod tests {
         "#;
         let sc: SessionConfig = toml::from_str(toml).unwrap();
         assert_eq!(sc.idle_timeout_mins, 120);
+    }
+
+    // ── ActorsConfig tests ──────────────────────────────
+
+    #[test]
+    fn test_actors_defaults_disabled() {
+        let ac = ActorsConfig::default();
+        assert!(!ac.enabled);
+        assert_eq!(ac.router_mailbox, 1024);
+        assert_eq!(ac.session_mailbox, 256);
+        assert_eq!(ac.supervision.egress_send_timeout_ms, 200);
+        assert_eq!(ac.supervision.egress_retry_backoff_ms, 50);
+        assert_eq!(ac.supervision.egress_max_retries, 3);
+        assert_eq!(ac.tooling.allowed_capabilities, vec!["*"]);
+        assert_eq!(
+            ac.dead_letter_path,
+            PathBuf::from("data/dead_letters.jsonl")
+        );
+    }
+
+    #[test]
+    fn test_actors_custom_values_toml() {
+        let toml = r#"
+            enabled = true
+            router_mailbox = 2048
+            session_mailbox = 512
+
+            [tooling]
+            max_tool_rounds = 12
+            skill_timeout_secs = 45
+            allowed_capabilities = ["network:*"]
+
+            [supervision]
+            egress_send_timeout_ms = 350
+            egress_retry_backoff_ms = 75
+            egress_max_retries = 5
+        "#;
+        let ac: ActorsConfig = toml::from_str(toml).unwrap();
+        assert!(ac.enabled);
+        assert_eq!(ac.router_mailbox, 2048);
+        assert_eq!(ac.session_mailbox, 512);
+        assert_eq!(ac.tooling.max_tool_rounds, 12);
+        assert_eq!(ac.tooling.skill_timeout_secs, 45);
+        assert_eq!(ac.supervision.egress_send_timeout_ms, 350);
+        assert_eq!(ac.supervision.egress_retry_backoff_ms, 75);
+        assert_eq!(ac.supervision.egress_max_retries, 5);
+        // Non-overridden fields keep defaults.
+        assert_eq!(ac.tooling.max_parallel_skills, 32);
+        assert_eq!(ac.tooling.allowed_capabilities, vec!["network:*"]);
     }
 }

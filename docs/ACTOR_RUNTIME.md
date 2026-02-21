@@ -1,14 +1,16 @@
 # Actor Runtime Design
 
-Status: Draft  
+Status: Implemented (Phase E complete)  
 Project: Fluux Agent  
-Last updated: 2026-02-19
+Last updated: 2026-02-21
 
 ## 1. Context
 
-Fluux Agent currently runs with a single runtime loop that handles transport, authorization, command routing, planning, tool calls, memory persistence, and response emission in one control path.
+Fluux Agent historically ran with a single runtime loop that handled transport, authorization, command routing, planning, tool calls, memory persistence, and response emission in one control path.
 
-This works for v0.x but creates scaling and reliability pressure as soon as we add:
+The actor migration is now complete in the startup path, and this document serves both as architecture reference and migration record.
+
+The single-loop design worked for v0.x but created scaling and reliability pressure as soon as we add:
 
 - More skills
 - Subagents
@@ -34,23 +36,29 @@ XMPP is treated as an external boundary (users and remote agents), while interna
 - Replacing Tokio with a custom scheduler.
 - Immediate distributed clustering (single-process first).
 - Changing session file format in this migration.
-- Removing current runtime code in phase 1.
+- Reintroducing monolithic orchestration.
 - Using XMPP stanza flows for in-process actor-to-actor communication.
 
 ## 4. Current Runtime Snapshot
 
-Main orchestration is concentrated in:
+Main orchestration runs through:
 
 - `src/main.rs`
+- `src/actors/supervisor.rs`
+- `src/actors/router.rs`
+- `src/actors/session.rs`
+
+Runtime dependency assembly lives in:
+
 - `src/agent/runtime.rs`
 
-Skills are registered centrally and executed inline from the LLM tool loop:
+Skills are registered at startup and dispatched through the actor pipeline:
 
 - `src/skills/mod.rs`
 - `src/skills/registry.rs`
 - `src/skills/builtin/*`
 
-Transport is already channel-based and can be wrapped by actors with low risk:
+Transport boundary remains stable in:
 
 - `src/xmpp/component.rs`
 - `src/xmpp/client.rs`
@@ -286,41 +294,41 @@ queue_depth_export_interval_secs = 5
 slow_actor_warn_ms = 200
 ```
 
-Defaults should preserve current behavior when actor mode is disabled.
+`actors.enabled` is kept for backward-compatibility but ignored at runtime.
 
-## 13. Incremental Migration Plan
+## 13. Incremental Migration Status
 
-### Phase A: Boundaries first
+### Phase A: Boundaries first (completed)
 
 - Introduce supervisor, ingress, egress, and router actors.
-- Keep existing `AgentRuntime` logic behind one session worker actor.
+- Kept existing runtime logic behind one session worker actor during transition.
 
 Outcome: topology in place, low behavioral change.
 
-### Phase B: Per-conversation session actors
+### Phase B: Per-conversation session actors (completed)
 
 - Route by bare JID/room JID.
 - Enforce per-conversation mailbox ordering.
 
 Outcome: isolation between conversations.
 
-### Phase C: Tool executor split
+### Phase C: Tool executor split (completed)
 
 - Extract agentic tool loop from runtime into `ToolExecutorActor`.
 - Add strict timeout and budget controls.
 
 Outcome: tool failures isolated and measurable.
 
-### Phase D: Skill actors
+### Phase D: Skill actors (completed)
 
 - Convert builtins to skill actors via router.
 - Add policy and capability checks at router boundary.
 
 Outcome: side-effect isolation and better security posture.
 
-### Phase E: Retire legacy runtime path
+### Phase E: Retire legacy runtime path (completed)
 
-- Remove direct monolithic orchestration once parity tests pass.
+- Direct monolithic orchestration removed after parity stabilization.
 
 Outcome: actor runtime becomes default.
 
@@ -344,7 +352,7 @@ Update:
 
 - `src/main.rs` (bootstrap and wiring)
 - `src/config.rs` (actors config)
-- `src/agent/runtime.rs` (extract logic, preserve compatibility during migration)
+- `src/agent/runtime.rs` (actor dependency assembly for startup/tests)
 - `src/skills/registry.rs` (dispatch indirection)
 
 Likely unchanged in early phases:
@@ -369,7 +377,8 @@ Likely unchanged in early phases:
 - Boundary translation tests:
   - ingress stanza -> internal envelope mapping and authorization
   - internal outbound intent -> egress stanza/command mapping
-- Regression suite to compare outputs with legacy runtime for same fixtures.
+- Deterministic actor fixture regression suite for chat/presence/reaction/tool flows.
+- Compatibility tests for legacy dead-letter records and replay behavior.
 - Load tests for mailbox saturation and bounded latency.
 
 ### 15.1 Mandatory Observability Baseline
@@ -397,7 +406,7 @@ Risk: more moving parts and protocol complexity.
 Mitigation: explicit typed contracts, tracing correlation IDs, strict module boundaries.
 
 Risk: behavior drift during migration.  
-Mitigation: dual-path feature flag and fixture-based parity tests.
+Mitigation: fixture-based actor regression tests and staged rollout validation.
 
 Risk: dead letters or dropped messages under pressure.  
 Mitigation: bounded queues with explicit overflow policy and telemetry.

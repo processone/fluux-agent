@@ -4,11 +4,13 @@ pub mod registry;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 /// Runtime context passed to skill execution.
 ///
 /// Provides the invoking JID and memory base path so skills
 /// can scope their state per-conversation-partner.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillContext {
     /// Bare JID of the conversation partner (user or room).
     pub jid: String,

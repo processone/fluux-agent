@@ -445,7 +445,9 @@ impl StanzaBuilder {
 
     /// Check if any direct child has a given local name (used for chat state detection).
     fn has_child_with_name(&self, names: &[&str]) -> bool {
-        self.children.iter().any(|c| names.contains(&c.name.as_str()))
+        self.children
+            .iter()
+            .any(|c| names.contains(&c.name.as_str()))
     }
 }
 
@@ -641,10 +643,7 @@ fn extract_attrs_from_event(e: &quick_xml::events::BytesStart<'_>) -> Vec<(Strin
             let key = std::str::from_utf8(a.key.as_ref())
                 .unwrap_or("")
                 .to_string();
-            let value = a
-                .unescape_value()
-                .unwrap_or_default()
-                .into_owned();
+            let value = a.unescape_value().unwrap_or_default().into_owned();
             (key, value)
         })
         .collect()
@@ -845,15 +844,8 @@ pub fn extract_attr(xml: &str, attr: &str) -> Option<String> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                if let Some(a) = e
-                    .try_get_attribute(attr.as_bytes())
-                    .ok()
-                    .flatten()
-                {
-                    return a
-                        .unescape_value()
-                        .ok()
-                        .map(|v| v.into_owned());
+                if let Some(a) = e.try_get_attribute(attr.as_bytes()).ok().flatten() {
+                    return a.unescape_value().ok().map(|v| v.into_owned());
                 }
             }
             Ok(Event::Eof) | Err(_) => return None,
@@ -989,10 +981,7 @@ mod tests {
     #[test]
     fn test_extract_sasl_challenge() {
         let xml = "<challenge xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>cj1meW...</challenge>";
-        assert_eq!(
-            extract_sasl_challenge(xml),
-            Some("cj1meW...".to_string())
-        );
+        assert_eq!(extract_sasl_challenge(xml), Some("cj1meW...".to_string()));
     }
 
     #[test]
@@ -1179,7 +1168,9 @@ mod tests {
 
     #[test]
     fn test_is_starttls_proceed() {
-        assert!(is_starttls_proceed("<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>"));
+        assert!(is_starttls_proceed(
+            "<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>"
+        ));
         assert!(!is_starttls_proceed("<failure/>"));
     }
 
@@ -1203,13 +1194,17 @@ mod tests {
 
     #[test]
     fn test_is_sasl_success() {
-        assert!(is_sasl_success("<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>"));
+        assert!(is_sasl_success(
+            "<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>"
+        ));
         assert!(!is_sasl_success("<failure/>"));
     }
 
     #[test]
     fn test_is_sasl_challenge() {
-        assert!(is_sasl_challenge("<challenge xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>data</challenge>"));
+        assert!(is_sasl_challenge(
+            "<challenge xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>data</challenge>"
+        ));
         assert!(!is_sasl_challenge("<success/>"));
     }
 
@@ -1231,14 +1226,20 @@ mod tests {
     #[test]
     fn test_extract_attr_single_quotes() {
         let xml = "<message from='user@localhost' to='bot@localhost'>";
-        assert_eq!(extract_attr(xml, "from"), Some("user@localhost".to_string()));
+        assert_eq!(
+            extract_attr(xml, "from"),
+            Some("user@localhost".to_string())
+        );
         assert_eq!(extract_attr(xml, "to"), Some("bot@localhost".to_string()));
     }
 
     #[test]
     fn test_extract_attr_double_quotes() {
         let xml = r#"<message from="user@localhost" type="chat">"#;
-        assert_eq!(extract_attr(xml, "from"), Some("user@localhost".to_string()));
+        assert_eq!(
+            extract_attr(xml, "from"),
+            Some("user@localhost".to_string())
+        );
         assert_eq!(extract_attr(xml, "type"), Some("chat".to_string()));
     }
 
@@ -1301,7 +1302,12 @@ mod tests {
 
     #[test]
     fn test_build_muc_message_component() {
-        let xml = build_muc_message(Some("agent.localhost"), "lobby@conference.localhost", "Hi!", None);
+        let xml = build_muc_message(
+            Some("agent.localhost"),
+            "lobby@conference.localhost",
+            "Hi!",
+            None,
+        );
         assert!(xml.contains("from='agent.localhost'"));
         assert!(xml.contains("type='groupchat'"));
         assert!(xml.contains("<body>Hi!</body>"));
@@ -1573,7 +1579,8 @@ mod tests {
 
     #[test]
     fn test_sp_stream_error_conflict() {
-        let xml = "<stream:error><conflict xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>";
+        let xml =
+            "<stream:error><conflict xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error>";
         match parse_xml_to_stanza(xml).unwrap() {
             XmppStanza::StreamError(c) => assert_eq!(c, "conflict"),
             other => panic!("Expected StreamError, got {other:?}"),
@@ -1621,7 +1628,7 @@ mod tests {
     fn test_sp_stanzas_inside_stream() {
         let stanzas = parse_xml_in_stream(
             "<message from='a@b' to='c@d' type='chat'><body>hi</body></message>\
-             <presence from='a@b' type='unavailable'/>"
+             <presence from='a@b' type='unavailable'/>",
         );
         // Should have: StreamLevel (open), Message, Presence, StreamLevel (close)
         let mut msgs = 0;
@@ -1666,7 +1673,8 @@ mod tests {
 
     #[test]
     fn test_sp_real_oob_message() {
-        let xml = "<message from='user@example.com/mobile' to='bot@example.com' type='chat' id='abc123'>\
+        let xml =
+            "<message from='user@example.com/mobile' to='bot@example.com' type='chat' id='abc123'>\
                    <body>Can you read this ?\nhttps://upload.example.com/file.png</body>\
                    <active xmlns='http://jabber.org/protocol/chatstates'/>\
                    <x xmlns='jabber:x:oob'>\
@@ -1732,7 +1740,8 @@ mod tests {
 
     #[test]
     fn test_sp_presence_with_children_parsed() {
-        let xml = "<presence from='a@b'><x xmlns='vcard-temp:x:update'/><show>away</show></presence>";
+        let xml =
+            "<presence from='a@b'><x xmlns='vcard-temp:x:update'/><show>away</show></presence>";
         match parse_xml_to_stanza(xml).unwrap() {
             XmppStanza::Presence(p) => {
                 assert_eq!(p.from, "a@b");

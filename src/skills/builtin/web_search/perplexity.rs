@@ -99,10 +99,7 @@ impl SearchProvider for PerplexityProvider {
         let pplx: PerplexityApiResponse = response.json().await?;
 
         // Extract the assistant's answer as the summary
-        let summary = pplx
-            .choices
-            .first()
-            .map(|c| c.message.content.clone());
+        let summary = pplx.choices.first().map(|c| c.message.content.clone());
 
         // Build results from search_results if present,
         // otherwise fall back to citations (URLs only).
@@ -192,13 +189,11 @@ mod tests {
                 },
             }],
             citations: Some(vec!["https://a.com".to_string()]),
-            search_results: Some(vec![
-                PerplexitySearchResult {
-                    title: "Structured".to_string(),
-                    url: "https://structured.example".to_string(),
-                    snippet: Some("Detailed snippet.".to_string()),
-                },
-            ]),
+            search_results: Some(vec![PerplexitySearchResult {
+                title: "Structured".to_string(),
+                url: "https://structured.example".to_string(),
+                snippet: Some("Detailed snippet.".to_string()),
+            }]),
         };
         let summary = pplx.choices.first().map(|c| c.message.content.clone());
         let results = if let Some(search_results) = pplx.search_results {
@@ -292,29 +287,28 @@ mod tests {
             search_results: None,
         };
         let summary = pplx.choices.first().map(|c| c.message.content.clone());
-        let results: Vec<SearchResult> =
-            if let Some(search_results) = pplx.search_results {
-                search_results
-                    .into_iter()
-                    .map(|r| SearchResult {
-                        title: r.title,
-                        url: r.url,
-                        snippet: r.snippet.unwrap_or_default(),
-                    })
-                    .collect()
-            } else if let Some(citations) = pplx.citations {
-                citations
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, url)| SearchResult {
-                        title: format!("Source {}", i + 1),
-                        url,
-                        snippet: String::new(),
-                    })
-                    .collect()
-            } else {
-                vec![]
-            };
+        let results: Vec<SearchResult> = if let Some(search_results) = pplx.search_results {
+            search_results
+                .into_iter()
+                .map(|r| SearchResult {
+                    title: r.title,
+                    url: r.url,
+                    snippet: r.snippet.unwrap_or_default(),
+                })
+                .collect()
+        } else if let Some(citations) = pplx.citations {
+            citations
+                .into_iter()
+                .enumerate()
+                .map(|(i, url)| SearchResult {
+                    title: format!("Source {}", i + 1),
+                    url,
+                    snippet: String::new(),
+                })
+                .collect()
+        } else {
+            vec![]
+        };
         let response = SearchResponse { summary, results };
 
         assert_eq!(response.summary.as_deref(), Some("I don't know."));

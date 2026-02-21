@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -9,7 +10,9 @@ use tracing::{debug, error, info, warn};
 
 use quick_xml::events::Event;
 
-use super::stanzas::{self, IncomingMessage, IncomingPresence, IncomingReaction, StanzaParser, XmppStanza};
+use super::stanzas::{
+    self, IncomingMessage, IncomingPresence, IncomingReaction, StanzaParser, XmppStanza,
+};
 use super::XmppError;
 use crate::config::{ConnectionMode, ServerConfig};
 
@@ -29,7 +32,7 @@ pub enum XmppEvent {
 }
 
 /// Commands sent by the runtime to the XMPP layer
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum XmppCommand {
     SendMessage {
         to: String,
@@ -50,7 +53,10 @@ pub enum XmppCommand {
         id: Option<String>,
     },
     /// Join a MUC room (XEP-0045)
-    JoinMuc { room: String, nick: String },
+    JoinMuc {
+        room: String,
+        nick: String,
+    },
     SendRaw(String),
     /// Whitespace keepalive ping (RFC 6120 §4.6.1).
     /// The write task sends a single space character.
@@ -58,7 +64,7 @@ pub enum XmppCommand {
 }
 
 /// Outbound chat state types (XEP-0085)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChatState {
     /// Agent is generating a response (LLM call in progress)
     Composing,
@@ -67,7 +73,7 @@ pub enum ChatState {
 }
 
 /// Reason the XMPP connection was lost.
-/// Returned by `AgentRuntime::run()` so the reconnection loop
+/// Returned by the actor supervisor so the reconnection loop
 /// can decide whether to retry.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisconnectReason {
@@ -116,7 +122,12 @@ impl XmppComponent {
 
         // Phase 3: Spawn the event loop as a background task
         tokio::spawn(Self::run_event_loop(
-            reader, writer, domain, event_tx, cmd_rx, read_timeout,
+            reader,
+            writer,
+            domain,
+            event_tx,
+            cmd_rx,
+            read_timeout,
         ));
 
         Ok((event_rx, cmd_tx))
@@ -124,9 +135,7 @@ impl XmppComponent {
 
     /// Establishes TCP connection and completes the XEP-0114 handshake.
     /// Returns the split stream and the component domain on success.
-    async fn establish(
-        &self,
-    ) -> Result<(OwnedReadHalf, OwnedWriteHalf, String), XmppError> {
+    async fn establish(&self) -> Result<(OwnedReadHalf, OwnedWriteHalf, String), XmppError> {
         let (domain, secret) = match &self.config.mode {
             ConnectionMode::Component {
                 component_domain,
@@ -235,9 +244,7 @@ impl XmppComponent {
                         Ok(result) => result,
                         Err(_elapsed) => {
                             debug!("Read timeout — requesting connection probe");
-                            let _ = event_tx_clone
-                                .send(XmppEvent::ReadTimeout)
-                                .await;
+                            let _ = event_tx_clone.send(XmppEvent::ReadTimeout).await;
                             continue;
                         }
                     }
@@ -258,18 +265,14 @@ impl XmppComponent {
                             match stanza {
                                 XmppStanza::Message(msg) => {
                                     debug!("Received message from {}: {}", msg.from, msg.body);
-                                    let _ = event_tx_clone
-                                        .send(XmppEvent::Message(msg))
-                                        .await;
+                                    let _ = event_tx_clone.send(XmppEvent::Message(msg)).await;
                                 }
                                 XmppStanza::Presence(pres) => {
                                     debug!(
                                         "Received presence from {}: {:?}",
                                         pres.from, pres.presence_type
                                     );
-                                    let _ = event_tx_clone
-                                        .send(XmppEvent::Presence(pres))
-                                        .await;
+                                    let _ = event_tx_clone.send(XmppEvent::Presence(pres)).await;
                                 }
                                 XmppStanza::Reaction(reaction) => {
                                     debug!(
@@ -278,9 +281,8 @@ impl XmppComponent {
                                         reaction.emojis.join(""),
                                         reaction.message_id
                                     );
-                                    let _ = event_tx_clone
-                                        .send(XmppEvent::Reaction(reaction))
-                                        .await;
+                                    let _ =
+                                        event_tx_clone.send(XmppEvent::Reaction(reaction)).await;
                                 }
                                 XmppStanza::StreamError(condition) => {
                                     error!("Stream error received: {condition}");

@@ -109,7 +109,12 @@ impl Memory {
         let global_files = ["instructions.md", "identity.md", "personality.md"];
         let found: Vec<&str> = global_files
             .iter()
-            .filter(|f| path.join(f).exists() && fs::read_to_string(path.join(f)).map(|c| !c.trim().is_empty()).unwrap_or(false))
+            .filter(|f| {
+                path.join(f).exists()
+                    && fs::read_to_string(path.join(f))
+                        .map(|c| !c.trim().is_empty())
+                        .unwrap_or(false)
+            })
             .copied()
             .collect();
 
@@ -124,7 +129,11 @@ impl Memory {
             if missing.is_empty() {
                 info!("Workspace: loaded {}", found.join(", "));
             } else {
-                info!("Workspace: loaded {} ({} not found)", found.join(", "), missing.join(", "));
+                info!(
+                    "Workspace: loaded {} ({} not found)",
+                    found.join(", "),
+                    missing.join(", ")
+                );
             }
         }
 
@@ -341,10 +350,7 @@ impl Memory {
         let path = self.user_dir(jid)?.join("history.jsonl");
         let is_new = !path.exists();
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         // Write session header on first entry
         if is_new {
@@ -655,10 +661,7 @@ impl Memory {
             }
         } else {
             // New key: append
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)?;
+            let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
             let json = serde_json::to_string(&new_entry)?;
             writeln!(file, "{json}")?;
         }
@@ -670,7 +673,10 @@ impl Memory {
     /// Returns `None` if the key does not exist.
     pub fn knowledge_get(&self, jid: &str, key: &str) -> Result<Option<String>> {
         let entries = self.load_knowledge(jid)?;
-        Ok(entries.into_iter().find(|e| e.key == key).map(|e| e.content))
+        Ok(entries
+            .into_iter()
+            .find(|e| e.key == key)
+            .map(|e| e.content))
     }
 
     /// Searches knowledge entries by keyword/substring match across keys and content.
@@ -713,7 +719,6 @@ impl Memory {
         Ok(self.load_knowledge(jid)?.len())
     }
 }
-
 
 // ── JSONL session parsing ─────────────────────────────
 
@@ -815,14 +820,8 @@ fn parse_session(content: &str) -> Vec<Message> {
                 // Only pass MUC sender labels to the LLM (for participant attribution).
                 // 1:1 senders are redundant — only one user in the conversation.
                 // MUC senders are identified by the "@muc" suffix convention.
-                let muc_sender = sender
-                    .as_deref()
-                    .filter(|s| s.ends_with("@muc"));
-                messages.push(build_message_for_llm(
-                    role,
-                    display,
-                    muc_sender,
-                ));
+                let muc_sender = sender.as_deref().filter(|s| s.ends_with("@muc"));
+                messages.push(build_message_for_llm(role, display, muc_sender));
             }
         }
     }
@@ -850,9 +849,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::open(dir.path()).unwrap();
 
-        memory
-            .store_message("user@test", "user", "Hello!")
-            .unwrap();
+        memory.store_message("user@test", "user", "Hello!").unwrap();
         memory
             .store_message("user@test", "assistant", "Hi there!")
             .unwrap();
@@ -1000,9 +997,7 @@ mod tests {
 
         assert!(!memory.has_user_profile("user@test").unwrap());
 
-        memory
-            .set_user_profile("user@test", "Something")
-            .unwrap();
+        memory.set_user_profile("user@test", "Something").unwrap();
         assert!(memory.has_user_profile("user@test").unwrap());
     }
 
@@ -1030,7 +1025,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::open(dir.path()).unwrap();
 
-        fs::write(dir.path().join("instructions.md"), "Be helpful and concise.").unwrap();
+        fs::write(
+            dir.path().join("instructions.md"),
+            "Be helpful and concise.",
+        )
+        .unwrap();
 
         let content = memory.get_global_file("instructions.md").unwrap();
         assert_eq!(content.unwrap(), "Be helpful and concise.");
@@ -1108,9 +1107,7 @@ mod tests {
         memory
             .store_message("user@test", "assistant", "Two")
             .unwrap();
-        memory
-            .store_message("user@test", "user", "Three")
-            .unwrap();
+        memory.store_message("user@test", "user", "Three").unwrap();
 
         assert_eq!(memory.message_count("user@test").unwrap(), 3);
     }
@@ -1123,9 +1120,7 @@ mod tests {
         let memory = Memory::open(dir.path()).unwrap();
 
         // Build a conversation
-        memory
-            .store_message("user@test", "user", "Hello!")
-            .unwrap();
+        memory.store_message("user@test", "user", "Hello!").unwrap();
         memory
             .store_message("user@test", "assistant", "Hi!")
             .unwrap();
@@ -1201,9 +1196,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::open(dir.path()).unwrap();
 
-        memory
-            .store_message("user@test", "user", "Hello!")
-            .unwrap();
+        memory.store_message("user@test", "user", "Hello!").unwrap();
         memory
             .set_user_context("user@test", "Likes coffee")
             .unwrap();
@@ -1222,15 +1215,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::open(dir.path()).unwrap();
 
-        memory
-            .store_message("user@test", "user", "Hello!")
-            .unwrap();
-        memory
-            .set_user_profile("user@test", "Developer")
-            .unwrap();
-        memory
-            .set_user_memory("user@test", "Likes Rust")
-            .unwrap();
+        memory.store_message("user@test", "user", "Hello!").unwrap();
+        memory.set_user_profile("user@test", "Developer").unwrap();
+        memory.set_user_memory("user@test", "Likes Rust").unwrap();
 
         let result = memory.forget("user@test").unwrap();
         assert!(result.contains("1 messages"));
@@ -1677,8 +1664,7 @@ not valid json
 
     #[test]
     fn test_parse_session_no_optional_fields() {
-        let content =
-            r#"{"type":"message","role":"user","content":"Hello!"}"#;
+        let content = r#"{"type":"message","role":"user","content":"Hello!"}"#;
 
         let messages = parse_session(content);
         assert_eq!(messages.len(), 1);
@@ -1796,7 +1782,12 @@ not valid json
         let json = r#"{"type":"message","role":"user","content":"Hello!","msg_id":"abc","sender":"alice@example.com","ts":"2025-02-08T19:00:00Z"}"#;
         let entry: SessionEntry = serde_json::from_str(json).unwrap();
         match entry {
-            SessionEntry::Message { attachments, reaction, content, .. } => {
+            SessionEntry::Message {
+                attachments,
+                reaction,
+                content,
+                ..
+            } => {
                 assert!(attachments.is_none());
                 assert!(reaction.is_none());
                 assert_eq!(content, "Hello!");
@@ -1890,7 +1881,15 @@ not valid json
         }];
 
         memory
-            .store_message_full("user@test", "user", "", None, Some("user@test"), Some(atts), None)
+            .store_message_full(
+                "user@test",
+                "user",
+                "",
+                None,
+                Some("user@test"),
+                Some(atts),
+                None,
+            )
             .unwrap();
 
         let history = memory.get_history("user@test", 10).unwrap();
@@ -1961,13 +1960,7 @@ not valid json
             )
             .unwrap();
         memory
-            .store_message_structured(
-                "user@test",
-                "assistant",
-                "Hi there!",
-                Some("def-456"),
-                None,
-            )
+            .store_message_structured("user@test", "assistant", "Hi there!", Some("def-456"), None)
             .unwrap();
 
         let history = memory.get_history("user@test", 10).unwrap();
@@ -2073,11 +2066,8 @@ not valid json
 
     #[test]
     fn test_build_message_for_llm_with_muc_sender() {
-        let msg = build_message_for_llm(
-            "user".to_string(),
-            "Hello!".to_string(),
-            Some("alice@muc"),
-        );
+        let msg =
+            build_message_for_llm("user".to_string(), "Hello!".to_string(), Some("alice@muc"));
         assert_eq!(msg.role, "user");
         assert_eq!(text(&msg.content), "alice@muc: Hello!");
     }
@@ -2142,7 +2132,8 @@ not valid json
     #[test]
     fn test_parse_session_assistant_with_msg_id_no_prefix() {
         // Assistant messages never get sender prefix
-        let content = r#"{"type":"message","role":"assistant","content":"Reply","msg_id":"out-001"}"#;
+        let content =
+            r#"{"type":"message","role":"assistant","content":"Reply","msg_id":"out-001"}"#;
         let messages = parse_session(content);
         assert_eq!(text(&messages[0].content), "Reply");
     }
@@ -2220,9 +2211,15 @@ not valid json
         let memory = Memory::open(dir.path()).unwrap();
         let jid = "alice@example.com";
 
-        memory.knowledge_store(jid, "language", "Prefers Rust over Go").unwrap();
-        memory.knowledge_store(jid, "timezone", "Europe/Paris").unwrap();
-        memory.knowledge_store(jid, "project", "Building a web server").unwrap();
+        memory
+            .knowledge_store(jid, "language", "Prefers Rust over Go")
+            .unwrap();
+        memory
+            .knowledge_store(jid, "timezone", "Europe/Paris")
+            .unwrap();
+        memory
+            .knowledge_store(jid, "project", "Building a web server")
+            .unwrap();
 
         let result = memory.knowledge_search(jid, "Rust").unwrap();
         assert!(result.contains("language"));
@@ -2236,7 +2233,9 @@ not valid json
         let memory = Memory::open(dir.path()).unwrap();
         let jid = "alice@example.com";
 
-        memory.knowledge_store(jid, "language", "Prefers Rust").unwrap();
+        memory
+            .knowledge_store(jid, "language", "Prefers Rust")
+            .unwrap();
 
         let result = memory.knowledge_search(jid, "rust").unwrap();
         assert!(result.contains("language"));
@@ -2303,8 +2302,12 @@ not valid json
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::open(dir.path()).unwrap();
 
-        memory.knowledge_store("alice@example.com", "color", "blue").unwrap();
-        memory.knowledge_store("bob@example.com", "color", "red").unwrap();
+        memory
+            .knowledge_store("alice@example.com", "color", "blue")
+            .unwrap();
+        memory
+            .knowledge_store("bob@example.com", "color", "red")
+            .unwrap();
 
         let alice = memory.knowledge_get("alice@example.com", "color").unwrap();
         let bob = memory.knowledge_get("bob@example.com", "color").unwrap();
@@ -2319,7 +2322,9 @@ not valid json
         let memory = Memory::open(dir.path()).unwrap();
         let room_jid = "room@conference.example.com";
 
-        memory.knowledge_store(room_jid, "topic", "Rust development").unwrap();
+        memory
+            .knowledge_store(room_jid, "topic", "Rust development")
+            .unwrap();
         let result = memory.knowledge_get(room_jid, "topic").unwrap();
         assert_eq!(result, Some("Rust development".to_string()));
     }
@@ -2419,7 +2424,9 @@ not valid json
         let memory = Memory::open(dir.path()).unwrap();
 
         memory.store_message("user@test", "user", "Hello").unwrap();
-        memory.store_message("user@test", "assistant", "Hi!").unwrap();
+        memory
+            .store_message("user@test", "assistant", "Hi!")
+            .unwrap();
 
         // Backdate the file's mtime by 2 hours
         let history_path = dir.path().join("user@test/history.jsonl");
@@ -2480,7 +2487,9 @@ not valid json
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::open(dir.path()).unwrap();
 
-        memory.store_message("user@test", "user", "Old message").unwrap();
+        memory
+            .store_message("user@test", "user", "Old message")
+            .unwrap();
 
         // Backdate the file
         let history_path = dir.path().join("user@test/history.jsonl");
@@ -2498,7 +2507,9 @@ not valid json
         memory.check_session_freshness("user@test", 60).unwrap();
 
         // Now store a new message — should start a fresh session
-        memory.store_message("user@test", "user", "New message").unwrap();
+        memory
+            .store_message("user@test", "user", "New message")
+            .unwrap();
 
         let history = memory.get_history("user@test", 10).unwrap();
         assert_eq!(history.len(), 1);

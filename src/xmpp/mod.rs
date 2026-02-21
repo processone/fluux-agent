@@ -61,9 +61,7 @@ pub async fn connect(
     };
 
     match &config.mode {
-        ConnectionMode::Component { .. } => {
-            XmppComponent::new(config).connect(read_timeout).await
-        }
+        ConnectionMode::Component { .. } => XmppComponent::new(config).connect(read_timeout).await,
         ConnectionMode::Client { .. } => {
             client::XmppClient::new(config)
                 .with_allowed_jids(allowed_jids)

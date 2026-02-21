@@ -18,11 +18,11 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::config::LlmConfig;
 use super::client::LlmClient;
 use super::{
     InputContentBlock, LlmResponse, Message, MessageContent, StopReason, ToolCall, ToolDefinition,
 };
+use crate::config::LlmConfig;
 
 /// Default Ollama API base URL.
 const DEFAULT_OLLAMA_HOST: &str = "http://localhost:11434";
@@ -192,12 +192,7 @@ impl LlmClient for OllamaClient {
             if tools.is_some() { " + tools" } else { "" }
         );
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.client.post(&url).json(&request).send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -230,9 +225,7 @@ impl LlmClient for OllamaClient {
         // Build content_blocks for re-submission in the agentic loop
         let mut content_blocks = Vec::new();
         if !text.is_empty() {
-            content_blocks.push(InputContentBlock::Text {
-                text: text.clone(),
-            });
+            content_blocks.push(InputContentBlock::Text { text: text.clone() });
         }
         for tc in &tool_calls {
             content_blocks.push(InputContentBlock::ToolUse {
@@ -481,12 +474,10 @@ mod tests {
     fn test_translate_tool_result() {
         let msg = Message {
             role: "user".to_string(),
-            content: MessageContent::Blocks(vec![
-                InputContentBlock::ToolResult {
-                    tool_use_id: "tool_1".to_string(),
-                    content: "Found 5 results.".to_string(),
-                },
-            ]),
+            content: MessageContent::Blocks(vec![InputContentBlock::ToolResult {
+                tool_use_id: "tool_1".to_string(),
+                content: "Found 5 results.".to_string(),
+            }]),
         };
         let mut out = Vec::new();
         translate_message(&msg, &mut out);

@@ -62,9 +62,8 @@ fn is_text(content_type: &str) -> bool {
 /// Extract readable text from raw bytes based on content type.
 fn extract_text(content_type: &str, body: &[u8]) -> String {
     if is_html(content_type) {
-        html2text::from_read(body, TEXT_WIDTH).unwrap_or_else(|_| {
-            String::from_utf8_lossy(body).into_owned()
-        })
+        html2text::from_read(body, TEXT_WIDTH)
+            .unwrap_or_else(|_| String::from_utf8_lossy(body).into_owned())
     } else if is_text(content_type) {
         String::from_utf8_lossy(body).into_owned()
     } else {
@@ -132,11 +131,7 @@ impl Skill for UrlFetchSkill {
         vec!["network:http:443".to_string()]
     }
 
-    async fn execute(
-        &self,
-        params: Value,
-        _context: &SkillContext,
-    ) -> anyhow::Result<String> {
+    async fn execute(&self, params: Value, _context: &SkillContext) -> anyhow::Result<String> {
         let url_str = params["url"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: url"))?;
@@ -491,7 +486,10 @@ mod tests {
     async fn test_execute_data_scheme_rejected() {
         let skill = UrlFetchSkill::new();
         let result = skill
-            .execute(json!({"url": "data:text/html,<h1>hi</h1>"}), &test_context())
+            .execute(
+                json!({"url": "data:text/html,<h1>hi</h1>"}),
+                &test_context(),
+            )
             .await
             .unwrap();
         assert!(result.contains("URL fetch failed"));

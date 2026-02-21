@@ -127,7 +127,10 @@ pub async fn authenticate_scram_sha1<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         .collect();
 
     // Send client-final-message
-    let client_final = format!("{client_final_without_proof},p={}", B64.encode(&client_proof));
+    let client_final = format!(
+        "{client_final_without_proof},p={}",
+        B64.encode(&client_proof)
+    );
     let encoded_final = B64.encode(client_final.as_bytes());
     let response_stanza = stanzas::build_sasl_response(&encoded_final);
     stream.write_all(response_stanza.as_bytes()).await?;

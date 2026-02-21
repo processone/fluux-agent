@@ -1085,10 +1085,12 @@ host = "http://localhost:11434"   # optional, this is the default
 
 The agent initiates, not just responds. The runtime becomes more robust.
 
+- [ ] Agent-generated skills: template-based REST API skills (no code execution)
+- [ ] Bundled REST API skills: JIRA, Front (shipped templates using the REST skill system)
+- [ ] Builtin skill: GitHub (issues, PRs, repositories, notifications)
 - [ ] LLM API error handling (retry with backoff, fallback models, graceful degradation)
 - [ ] LLM prompt caching (`cache_control` markers for system prompt and history prefix)
 - [ ] Context window management (token-budget history, compaction, memory flush)
-- [ ] Builtin skill: GitHub (issues, PRs, repositories, notifications)
 - [ ] Sub-agent spawning (built-in runtime tool, one level deep)
 - [ ] Model tiering (route tasks to appropriate model by complexity/cost) + sub-agent model overrides
 - [ ] Prompt injection detection — scan incoming messages for adversarial patterns before they reach the LLM
@@ -1106,8 +1108,6 @@ The agent initiates, not just responds. The runtime becomes more robust.
 - [ ] Agent-generated skills: supervised proposals (LLM drafts, human approves)
 - [ ] Declarative skill capabilities (TOML manifests)
 - [ ] Action plan validation (separate from LLM)
-- [ ] Agent-generated skills: template-based REST API skills (no code execution)
-- [ ] Bundled REST API skills: JIRA, Front (shipped templates using the REST skill system)
 - [ ] Proactive context learning — agent updates `context.md` by summarizing conversations
 - [ ] XMPP Stream Management (XEP-0198) — message acknowledgment, session resumption, reliability for unstable networks
 - [ ] Language detection from stanza `xml:lang` attribute as hint for user's preferred language
@@ -1241,12 +1241,12 @@ capabilities = ["filesystem:/home/user/documents:read"]
 
 MCP servers are **less sandboxed** than native Wasm skills:
 
-| Aspect | Native Wasm | MCP Bridge |
-|--------|-------------|------------|
-| Memory isolation | Wasm linear memory | Process boundary |
-| Syscall filtering | seccomp whitelist | None (trusts server) |
-| Capability enforcement | Host functions | Declared, not enforced |
-| Crash isolation | Wasm trap | Process restart |
+| Aspect                 | Native Wasm        | MCP Bridge             |
+|------------------------|--------------------|------------------------|
+| Memory isolation       | Wasm linear memory | Process boundary       |
+| Syscall filtering      | seccomp whitelist  | None (trusts server)   |
+| Capability enforcement | Host functions     | Declared, not enforced |
+| Crash isolation        | Wasm trap          | Process restart        |
 
 To mitigate risks:
 
@@ -1314,16 +1314,16 @@ The agent can connect to Mastodon (and other ActivityPub-compatible services) bo
 
 Tools exposed to the LLM for outbound actions:
 
-| Tool                  | Description                                      |
-|-----------------------|--------------------------------------------------|
-| `mastodon_post`       | Post a new status (with optional media, CW, visibility) |
-| `mastodon_reply`      | Reply to a specific status                       |
-| `mastodon_search`     | Search for posts, users, or hashtags             |
-| `mastodon_timeline`   | Read home, local, or federated timeline          |
-| `mastodon_thread`     | Get full conversation thread for a status        |
-| `mastodon_favorite`   | Favorite a status                                |
-| `mastodon_boost`      | Boost (reblog) a status                          |
-| `mastodon_dm`         | Send a direct message to a user                  |
+| Tool                | Description                                             |
+|---------------------|---------------------------------------------------------|
+| `mastodon_post`     | Post a new status (with optional media, CW, visibility) |
+| `mastodon_reply`    | Reply to a specific status                              |
+| `mastodon_search`   | Search for posts, users, or hashtags                    |
+| `mastodon_timeline` | Read home, local, or federated timeline                 |
+| `mastodon_thread`   | Get full conversation thread for a status               |
+| `mastodon_favorite` | Favorite a status                                       |
+| `mastodon_boost`    | Boost (reblog) a status                                 |
+| `mastodon_dm`       | Send a direct message to a user                         |
 
 #### Inbound event channel
 

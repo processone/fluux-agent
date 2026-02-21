@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::llm::ToolDefinition;
 
@@ -11,9 +12,9 @@ use super::Skill;
 /// - Tool definition generation for the Anthropic API
 ///
 /// Skills are registered at startup and never modified afterward.
-/// The registry is owned by `AgentRuntime` and accessed via `&self`.
+/// The registry is injected into actor runtime dependencies and accessed via shared references.
 pub struct SkillRegistry {
-    skills: HashMap<String, Box<dyn Skill>>,
+    skills: HashMap<String, Arc<dyn Skill>>,
 }
 
 impl SkillRegistry {
@@ -28,12 +29,17 @@ impl SkillRegistry {
     /// it is replaced (last-write-wins).
     pub fn register(&mut self, skill: Box<dyn Skill>) {
         let name = skill.name().to_string();
-        self.skills.insert(name, skill);
+        self.skills.insert(name, Arc::from(skill));
     }
 
     /// Looks up a skill by name. Returns `None` if not found.
     pub fn get(&self, name: &str) -> Option<&dyn Skill> {
         self.skills.get(name).map(|s| s.as_ref())
+    }
+
+    /// Looks up a skill by name and returns a shared handle.
+    pub fn get_shared(&self, name: &str) -> Option<Arc<dyn Skill>> {
+        self.skills.get(name).cloned()
     }
 
     /// Returns the number of registered skills.
@@ -127,7 +133,11 @@ mod tests {
         fn parameters_schema(&self) -> serde_json::Value {
             self.schema.clone()
         }
-        async fn execute(&self, params: serde_json::Value, _context: &SkillContext) -> anyhow::Result<String> {
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _context: &SkillContext,
+        ) -> anyhow::Result<String> {
             let query = params["query"].as_str().unwrap_or("none");
             Ok(format!("result for: {query}"))
         }
@@ -251,12 +261,20 @@ mod tests {
 
         #[async_trait]
         impl Skill for FailSkill {
-            fn name(&self) -> &str { "fail" }
-            fn description(&self) -> &str { "Always fails" }
+            fn name(&self) -> &str {
+                "fail"
+            }
+            fn description(&self) -> &str {
+                "Always fails"
+            }
             fn parameters_schema(&self) -> serde_json::Value {
                 json!({"type": "object", "properties": {}})
             }
-            async fn execute(&self, _params: serde_json::Value, _context: &SkillContext) -> anyhow::Result<String> {
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _context: &SkillContext,
+            ) -> anyhow::Result<String> {
                 Err(anyhow::anyhow!("intentional failure"))
             }
         }

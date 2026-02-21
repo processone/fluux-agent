@@ -154,7 +154,11 @@ impl Skill for WebSearchSkill {
         vec![self.provider.capability()]
     }
 
-    async fn execute(&self, params: Value, _context: &crate::skills::SkillContext) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        params: Value,
+        _context: &crate::skills::SkillContext,
+    ) -> anyhow::Result<String> {
         let query = params["query"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: query"))?;

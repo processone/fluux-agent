@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Client;
 use tokio::sync::Semaphore;
@@ -71,6 +72,11 @@ pub struct FileDownloader {
     semaphore: Arc<Semaphore>,
 }
 
+#[async_trait]
+pub trait AttachmentDownloader: Send + Sync {
+    async fn download(&self, url: &str, files_dir: &Path) -> Result<DownloadedFile>;
+}
+
 impl FileDownloader {
     /// Creates a new downloader with the given concurrency limit.
     ///
@@ -129,10 +135,7 @@ impl FileDownloader {
         let response = self.client.get(url).send().await?;
 
         if !response.status().is_success() {
-            return Err(anyhow!(
-                "Download failed: HTTP {}",
-                response.status()
-            ));
+            return Err(anyhow!("Download failed: HTTP {}", response.status()));
         }
 
         // Check Content-Length before downloading
@@ -208,6 +211,13 @@ impl FileDownloader {
     }
 }
 
+#[async_trait]
+impl AttachmentDownloader for FileDownloader {
+    async fn download(&self, url: &str, files_dir: &Path) -> Result<DownloadedFile> {
+        FileDownloader::download(self, url, files_dir).await
+    }
+}
+
 /// Converts a downloaded file to an Anthropic API content block.
 ///
 /// Returns `Some(InputContentBlock)` for supported types (images, PDFs),
@@ -271,11 +281,7 @@ fn categorize_mime(mime: &str) -> FileCategory {
 
 /// Guesses MIME type from a filename extension.
 fn mime_from_extension(filename: &str) -> String {
-    let ext = filename
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
@@ -292,7 +298,13 @@ fn mime_from_extension(filename: &str) -> String {
 /// Sanitizes a filename for safe disk storage.
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -343,7 +355,10 @@ mod tests {
         assert_eq!(mime_from_extension("photo.webp"), "image/webp");
         assert_eq!(mime_from_extension("doc.pdf"), "application/pdf");
         assert_eq!(mime_from_extension("readme.txt"), "text/plain");
-        assert_eq!(mime_from_extension("unknown.xyz"), "application/octet-stream");
+        assert_eq!(
+            mime_from_extension("unknown.xyz"),
+            "application/octet-stream"
+        );
         assert_eq!(mime_from_extension("noext"), "application/octet-stream");
     }
 

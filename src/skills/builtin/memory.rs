@@ -250,7 +250,10 @@ mod tests {
 
         // Store two entries
         store
-            .execute(json!({"key": "language", "content": "Prefers Rust over Go"}), &ctx)
+            .execute(
+                json!({"key": "language", "content": "Prefers Rust over Go"}),
+                &ctx,
+            )
             .await
             .unwrap();
         store
@@ -267,10 +270,7 @@ mod tests {
         assert!(result.contains("Prefers Rust over Go"));
 
         // Recall all
-        let result = recall
-            .execute(json!({"query": ""}), &ctx)
-            .await
-            .unwrap();
+        let result = recall.execute(json!({"query": ""}), &ctx).await.unwrap();
         assert!(result.contains("language"));
         assert!(result.contains("timezone"));
         assert!(result.contains("2 knowledge entries"));

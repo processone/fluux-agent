@@ -108,6 +108,47 @@ path = "./data/memory"
 # ping_interval_secs = 60      # how often to send a whitespace ping
 # read_timeout_secs = 300      # declare connection dead after this much silence
 
+# --- Actor runtime (phase E default) ---
+# Actor topology is now the default startup runtime.
+# Legacy fallback has been removed from startup path.
+# `enabled` is kept only for backward-compatibility and is ignored at runtime.
+# [actors]
+# enabled = true
+# router_mailbox = 1024
+# session_mailbox = 256
+# max_active_sessions = 2000
+# session_idle_ttl_secs = 1800
+# busy_retry_after_secs = 5
+# dedupe_ttl_secs = 600
+# dead_letter_path = "data/dead_letters.jsonl"
+#
+# [actors.tooling]
+# max_tool_rounds = 10
+# skill_timeout_secs = 30
+# max_parallel_skills = 32
+# skill_queue_timeout_ms = 5000
+# allowed_capabilities = ["*"]   # wildcard keeps current behavior
+#                                # example: ["network:*", "filesystem:knowledge:*"]
+#
+# [actors.supervision]
+# restart_backoff_min_ms = 200
+# restart_backoff_max_ms = 10000
+# max_restarts_per_minute = 60
+# egress_send_timeout_ms = 200
+# egress_retry_backoff_ms = 50
+# egress_max_retries = 3
+#
+# [actors.memory]
+# enqueue_timeout_ms = 200
+# writer_shards = 1
+# write_batch_max = 32
+# write_batch_max_delay_ms = 20
+#
+# [actors.observability]
+# metrics_enabled = true
+# queue_depth_export_interval_secs = 5
+# slow_actor_warn_ms = 200
+
 # --- Future sections (v0.2+) ---
 
 # [sandbox]

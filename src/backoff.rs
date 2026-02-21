@@ -53,11 +53,7 @@ mod tests {
 
     #[test]
     fn test_exponential_growth() {
-        let mut b = Backoff::new(
-            Duration::from_secs(2),
-            Duration::from_secs(60),
-            2,
-        );
+        let mut b = Backoff::new(Duration::from_secs(2), Duration::from_secs(60), 2);
         assert_eq!(b.next_delay(), Duration::from_secs(2));
         assert_eq!(b.next_delay(), Duration::from_secs(4));
         assert_eq!(b.next_delay(), Duration::from_secs(8));
@@ -67,11 +63,7 @@ mod tests {
 
     #[test]
     fn test_max_delay_cap() {
-        let mut b = Backoff::new(
-            Duration::from_secs(2),
-            Duration::from_secs(10),
-            2,
-        );
+        let mut b = Backoff::new(Duration::from_secs(2), Duration::from_secs(10), 2);
         assert_eq!(b.next_delay(), Duration::from_secs(2));
         assert_eq!(b.next_delay(), Duration::from_secs(4));
         assert_eq!(b.next_delay(), Duration::from_secs(8));
@@ -83,11 +75,7 @@ mod tests {
 
     #[test]
     fn test_reset() {
-        let mut b = Backoff::new(
-            Duration::from_secs(2),
-            Duration::from_secs(60),
-            2,
-        );
+        let mut b = Backoff::new(Duration::from_secs(2), Duration::from_secs(60), 2);
         b.next_delay(); // 2
         b.next_delay(); // 4
         b.next_delay(); // 8
@@ -101,11 +89,7 @@ mod tests {
 
     #[test]
     fn test_exceeded_max_attempts() {
-        let mut b = Backoff::new(
-            Duration::from_secs(1),
-            Duration::from_secs(60),
-            2,
-        );
+        let mut b = Backoff::new(Duration::from_secs(1), Duration::from_secs(60), 2);
         assert!(!b.exceeded_max_attempts(3));
         b.next_delay();
         assert!(!b.exceeded_max_attempts(3));
@@ -117,11 +101,7 @@ mod tests {
 
     #[test]
     fn test_attempt_counter() {
-        let mut b = Backoff::new(
-            Duration::from_secs(1),
-            Duration::from_secs(60),
-            2,
-        );
+        let mut b = Backoff::new(Duration::from_secs(1), Duration::from_secs(60), 2);
         assert_eq!(b.attempt, 0);
         b.next_delay();
         assert_eq!(b.attempt, 1);
@@ -131,11 +111,7 @@ mod tests {
 
     #[test]
     fn test_multiplier_three() {
-        let mut b = Backoff::new(
-            Duration::from_secs(1),
-            Duration::from_secs(100),
-            3,
-        );
+        let mut b = Backoff::new(Duration::from_secs(1), Duration::from_secs(100), 3);
         assert_eq!(b.next_delay(), Duration::from_secs(1));
         assert_eq!(b.next_delay(), Duration::from_secs(3));
         assert_eq!(b.next_delay(), Duration::from_secs(9));
