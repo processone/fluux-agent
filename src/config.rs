@@ -22,8 +22,7 @@ pub struct Config {
     #[serde(default)]
     pub session: SessionConfig,
     /// Actor runtime configuration.
-    /// Runtime actor options. Actor topology is always used at startup.
-    /// The `enabled` field is kept for backward-compatibility and ignored.
+    /// Actor topology is always used at startup.
     #[serde(default)]
     pub actors: ActorsConfig,
 }
@@ -218,12 +217,10 @@ impl Default for SessionConfig {
 
 /// Actor runtime configuration.
 ///
-/// This is intentionally disabled by default so existing deployments keep
-/// current runtime behavior until actor mode is explicitly enabled.
+/// Actor topology is the only runtime mode.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ActorsConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_router_mailbox")]
     pub router_mailbox: usize,
     #[serde(default = "default_session_mailbox")]
@@ -303,7 +300,6 @@ pub struct ActorObservabilityConfig {
 impl Default for ActorsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             router_mailbox: default_router_mailbox(),
             session_mailbox: default_session_mailbox(),
             max_active_sessions: default_max_active_sessions(),
@@ -586,6 +582,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     /// Helper to build a Config with specific allowed_jids
     fn config_with_jids(jids: Vec<&str>) -> Config {
@@ -876,9 +873,8 @@ mod tests {
     // ── ActorsConfig tests ──────────────────────────────
 
     #[test]
-    fn test_actors_defaults_disabled() {
+    fn test_actors_defaults() {
         let ac = ActorsConfig::default();
-        assert!(!ac.enabled);
         assert_eq!(ac.router_mailbox, 1024);
         assert_eq!(ac.session_mailbox, 256);
         assert_eq!(ac.supervision.egress_send_timeout_ms, 200);
@@ -894,7 +890,6 @@ mod tests {
     #[test]
     fn test_actors_custom_values_toml() {
         let toml = r#"
-            enabled = true
             router_mailbox = 2048
             session_mailbox = 512
 
@@ -909,7 +904,6 @@ mod tests {
             egress_max_retries = 5
         "#;
         let ac: ActorsConfig = toml::from_str(toml).unwrap();
-        assert!(ac.enabled);
         assert_eq!(ac.router_mailbox, 2048);
         assert_eq!(ac.session_mailbox, 512);
         assert_eq!(ac.tooling.max_tool_rounds, 12);
@@ -920,5 +914,95 @@ mod tests {
         // Non-overridden fields keep defaults.
         assert_eq!(ac.tooling.max_parallel_skills, 32);
         assert_eq!(ac.tooling.allowed_capabilities, vec!["network:*"]);
+    }
+
+    #[test]
+    fn test_actors_config_rejects_enabled_flag() {
+        let actors_toml = r#"
+            enabled = true
+            router_mailbox = 2048
+        "#;
+
+        let err = toml::from_str::<ActorsConfig>(actors_toml).expect_err("must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field"),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("enabled"), "unexpected error message: {msg}");
+    }
+
+    #[test]
+    fn test_config_load_rejects_actors_enabled_flag() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let config_path = tmp.path().join("agent.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[server]
+host = "localhost"
+port = 5222
+mode = "client"
+jid = "bot@localhost"
+password = "pass"
+
+[llm]
+provider = "anthropic"
+model = "claude-haiku-4-5-20250110"
+api_key = "test-key"
+
+[agent]
+name = "Test Agent"
+allowed_jids = ["admin@localhost"]
+
+[memory]
+path = "./data/memory"
+
+[actors]
+enabled = true
+"#,
+        )
+        .expect("write config");
+
+        let err = Config::load(config_path.to_str().expect("path str")).expect_err("must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field"),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("enabled"), "unexpected error message: {msg}");
+    }
+
+    #[test]
+    fn test_config_load_defaults_actors_when_section_absent() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let config_path = tmp.path().join("agent.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[server]
+host = "localhost"
+port = 5222
+mode = "client"
+jid = "bot@localhost"
+password = "pass"
+
+[llm]
+provider = "anthropic"
+model = "claude-haiku-4-5-20250110"
+api_key = "test-key"
+
+[agent]
+name = "Test Agent"
+allowed_jids = ["admin@localhost"]
+
+[memory]
+path = "./data/memory"
+"#,
+        )
+        .expect("write config");
+
+        let config = Config::load(config_path.to_str().expect("path str")).expect("config load");
+        assert_eq!(config.actors.router_mailbox, 1024);
     }
 }

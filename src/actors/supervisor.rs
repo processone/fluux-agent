@@ -598,7 +598,6 @@ mod tests {
 
     fn fixture_actors_config(dead_letter_path: PathBuf) -> ActorsConfig {
         ActorsConfig {
-            enabled: true,
             router_mailbox: 32,
             session_mailbox: 8,
             max_active_sessions: 8,
@@ -791,7 +790,6 @@ mod tests {
         let (runtime, _tmp) = test_runtime();
 
         let actors = ActorsConfig {
-            enabled: true,
             router_mailbox: 16,
             session_mailbox: 4,
             max_active_sessions: 4,
@@ -842,7 +840,6 @@ mod tests {
         let (runtime, _tmp) = test_runtime();
 
         let actors = ActorsConfig {
-            enabled: true,
             router_mailbox: 16,
             session_mailbox: 4,
             max_active_sessions: 4,
@@ -909,7 +906,6 @@ mod tests {
         let (runtime, _tmp) = test_runtime();
 
         let actors = ActorsConfig {
-            enabled: true,
             router_mailbox: 256,
             session_mailbox: 32,
             max_active_sessions: 16,

@@ -108,12 +108,9 @@ path = "./data/memory"
 # ping_interval_secs = 60      # how often to send a whitespace ping
 # read_timeout_secs = 300      # declare connection dead after this much silence
 
-# --- Actor runtime (phase E default) ---
-# Actor topology is now the default startup runtime.
-# Legacy fallback has been removed from startup path.
-# `enabled` is kept only for backward-compatibility and is ignored at runtime.
+# --- Actor runtime ---
+# Actor topology is the only startup runtime mode.
 # [actors]
-# enabled = true
 # router_mailbox = 1024
 # session_mailbox = 256
 # max_active_sessions = 2000

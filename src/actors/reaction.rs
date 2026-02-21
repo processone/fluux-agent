@@ -315,7 +315,6 @@ mod tests {
             keepalive: KeepaliveConfig::default(),
             session: SessionConfig::default(),
             actors: ActorsConfig {
-                enabled: true,
                 router_mailbox: 64,
                 session_mailbox: 8,
                 max_active_sessions: 8,

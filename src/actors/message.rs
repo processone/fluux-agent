@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, oneshot, OnceCell};
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
+use super::user_error;
 use crate::actors::memory_actor::SessionMemoryWriter;
 use crate::agent::memory::Attachment;
 use crate::config::Config;
@@ -254,7 +255,11 @@ impl MessageActor {
                         .await;
                 }
                 Err(e) => {
-                    error!("Error processing MUC message: {e}");
+                    let correlation_id = user_error::correlation_id_or_new(msg.id.as_deref());
+                    error!(
+                        correlation_id = %correlation_id,
+                        "Error processing MUC message: {e}"
+                    );
                     // Send <paused/> to indicate the agent stopped generating
                     let _ = cmd_tx
                         .send(XmppCommand::SendChatState {
@@ -266,7 +271,7 @@ impl MessageActor {
                     let _ = cmd_tx
                         .send(XmppCommand::SendMucMessage {
                             to: room_jid,
-                            body: format!("Sorry, an error occurred: {e}"),
+                            body: user_error::to_user_safe_message(&e, &correlation_id),
                             id: None,
                         })
                         .await;
@@ -310,11 +315,15 @@ impl MessageActor {
                             .await;
                     }
                     Err(e) => {
-                        error!("Error processing command: {e}");
+                        let correlation_id = user_error::correlation_id_or_new(msg.id.as_deref());
+                        error!(
+                            correlation_id = %correlation_id,
+                            "Error processing command: {e}"
+                        );
                         let _ = cmd_tx
                             .send(XmppCommand::SendMessage {
                                 to: msg.from.clone(),
-                                body: format!("Sorry, an error occurred: {e}"),
+                                body: user_error::to_user_safe_message(&e, &correlation_id),
                                 id: None,
                             })
                             .await;
@@ -333,11 +342,15 @@ impl MessageActor {
                     .await;
 
                 let from = msg.from.clone();
+                let correlation_id = user_error::correlation_id_or_new(msg.id.as_deref());
                 if let Err(e) = responder
                     .respond_to_attachment_message(msg, cmd_tx.clone())
                     .await
                 {
-                    error!("Error scheduling attachment message processing: {e}");
+                    error!(
+                        correlation_id = %correlation_id,
+                        "Error scheduling attachment message processing: {e}"
+                    );
                     let _ = cmd_tx
                         .send(XmppCommand::SendChatState {
                             to: from.clone(),
@@ -348,7 +361,7 @@ impl MessageActor {
                     let _ = cmd_tx
                         .send(XmppCommand::SendMessage {
                             to: from,
-                            body: format!("Sorry, an error occurred: {e}"),
+                            body: user_error::to_user_safe_message(&e, &correlation_id),
                             id: None,
                         })
                         .await;
@@ -380,7 +393,11 @@ impl MessageActor {
                             .await;
                     }
                     Err(e) => {
-                        error!("Error processing message: {e}");
+                        let correlation_id = user_error::correlation_id_or_new(msg.id.as_deref());
+                        error!(
+                            correlation_id = %correlation_id,
+                            "Error processing message: {e}"
+                        );
                         let _ = cmd_tx
                             .send(XmppCommand::SendChatState {
                                 to: msg.from.clone(),
@@ -391,7 +408,7 @@ impl MessageActor {
                         let _ = cmd_tx
                             .send(XmppCommand::SendMessage {
                                 to: msg.from.clone(),
-                                body: format!("Sorry, an error occurred: {e}"),
+                                body: user_error::to_user_safe_message(&e, &correlation_id),
                                 id: None,
                             })
                             .await;
@@ -607,7 +624,6 @@ mod tests {
             keepalive: KeepaliveConfig::default(),
             session: SessionConfig::default(),
             actors: ActorsConfig {
-                enabled: true,
                 router_mailbox: 64,
                 session_mailbox: 8,
                 max_active_sessions: 8,

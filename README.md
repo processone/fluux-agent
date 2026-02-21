@@ -127,7 +127,7 @@ fluux-agent/
 └── README.md
 ```
 
-For the planned actor-based orchestration model, see [Actor Runtime Design](docs/ACTOR_RUNTIME.md).
+Note: actor runtime is the only startup mode in this repo. For architecture details, see [Actor Runtime Design](docs/ACTOR_RUNTIME.md).
 
 ### Key Principles
 

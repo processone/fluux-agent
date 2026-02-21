@@ -1083,7 +1083,9 @@ host = "http://localhost:11434"   # optional, this is the default
 
 ## v0.3 — Proactivity & Resilience
 
-The agent initiates, not just responds. The runtime becomes more robust.
+The agent initiates, not just responds. Robustness is not automatic, but actorization
+makes it practical and testable at scale; the monolithic loop makes sustained
+reliability significantly harder.
 
 - [ ] Agent-generated skills: template-based REST API skills (no code execution)
 - [ ] Bundled REST API skills: JIRA, Front (shipped templates using the REST skill system)

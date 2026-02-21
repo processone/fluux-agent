@@ -214,10 +214,7 @@ async fn main() -> Result<()> {
         supervisor_dependencies,
     );
 
-    if !config.actors.enabled {
-        warn!("Config key `actors.enabled=false` is ignored in phase E; actor runtime is always enabled");
-    }
-    info!("Runtime mode: actor topology (phase E default)");
+    info!("Runtime mode: actor topology");
 
     let mut backoff = Backoff::new(Duration::from_secs(2), Duration::from_secs(60), 2);
 

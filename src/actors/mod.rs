@@ -18,5 +18,6 @@ pub mod supervisor;
 pub mod test_actor_runtime_harness;
 pub mod tool_executor;
 pub mod types;
+pub mod user_error;
 pub mod xmpp_egress;
 pub mod xmpp_ingress;

@@ -262,7 +262,6 @@ Add a dedicated section in `config.rs` and TOML:
 
 ```toml
 [actors]
-enabled = true
 router_mailbox = 1024
 session_mailbox = 256
 max_active_sessions = 2000
@@ -293,8 +292,6 @@ metrics_enabled = true
 queue_depth_export_interval_secs = 5
 slow_actor_warn_ms = 200
 ```
-
-`actors.enabled` is kept for backward-compatibility but ignored at runtime.
 
 ## 13. Incremental Migration Status
 
@@ -404,6 +401,11 @@ Initial alerts:
 
 Risk: more moving parts and protocol complexity.  
 Mitigation: explicit typed contracts, tracing correlation IDs, strict module boundaries.
+
+Robustness is not automatic. Actorization adds moving parts, but it makes resilience
+practical and testable at scale through isolation, bounded queues, restart policies,
+dead-letter replay, and telemetry. The monolithic runtime loop makes these controls
+significantly harder to enforce consistently.
 
 Risk: behavior drift during migration.  
 Mitigation: fixture-based actor regression tests and staged rollout validation.
